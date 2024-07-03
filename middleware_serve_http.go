@@ -7,6 +7,7 @@ import (
 	"github.com/caddyserver/caddy/v2/modules/caddyhttp"
 	"github.com/chromedp/cdproto/cdp"
 	"github.com/chromedp/cdproto/dom"
+	"github.com/chromedp/cdproto/emulation"
 	"github.com/chromedp/cdproto/fetch"
 	"github.com/chromedp/cdproto/network"
 	"github.com/chromedp/cdproto/runtime"
@@ -89,6 +90,13 @@ func (m *Middleware) ServeHTTP(w http.ResponseWriter, r *http.Request, next cadd
 					err = network.SetCookie(cookie.Name, cookie.Value).WithDomain(r.Host).Do(ctx)
 					if err != nil {
 						return errors.Wrap(err, "failed to set cookie")
+					}
+				}
+
+				if ua := r.UserAgent(); ua != "" {
+					err = emulation.SetUserAgentOverride(ua).Do(ctx)
+					if err != nil {
+						return errors.Wrap(err, "failed to set user agent")
 					}
 				}
 

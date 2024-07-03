@@ -89,12 +89,21 @@ func TestMiddleware_ServeHTTP(t *testing.T) {
 				assert.Contains(t, body, `document.cookie is [test=cookie]`)
 			},
 		},
+		{
+			url: "http://localhost:9080/user_agent.html",
+			configureRequest: func(req *http.Request) error {
+				req.Header.Set("User-Agent", "test user agent")
+				return nil
+			},
+			verifier: func(t *testing.T, res *http.Response, body string) {
+				assert.Contains(t, body, `<html>`)
+				assert.Contains(t, body, `navigator.userAgent is [test user agent]`)
+			},
+		},
 	}
 
 	for _, testCase := range testCases {
 		t.Run(testCase.url, func(t *testing.T) {
-			t.Parallel()
-
 			req, err := http.NewRequest("GET", testCase.url, nil)
 			if err != nil {
 				t.Fatal(err)
