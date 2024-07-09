@@ -10,6 +10,7 @@ import (
 	"github.com/chromedp/cdproto/emulation"
 	"github.com/chromedp/cdproto/fetch"
 	"github.com/chromedp/cdproto/network"
+	"github.com/chromedp/cdproto/page"
 	"github.com/chromedp/cdproto/runtime"
 	"github.com/chromedp/chromedp"
 	"github.com/pkg/errors"
@@ -90,85 +91,86 @@ func (m *Middleware) ServeHTTP(w http.ResponseWriter, r *http.Request, next cadd
 
 	var tasks chromedp.Tasks
 	tasks = append(tasks, fetch.Enable())
+	tasks = append(tasks, runtime.Enable())
 	tasks = append(tasks, chromedp.ActionFunc(func(ctx context.Context) error {
 		chromedp.ListenTarget(ctx, func(event any) {
-			requestPaused, ok := event.(*fetch.EventRequestPaused)
-			if !ok {
-				return
+			switch event := event.(type) {
+			case *fetch.EventRequestPaused:
+				go func() {
+					var res response
+					pausedURL, err := url.Parse(event.Request.URL)
+					m.log.Debug("request paused",
+						zap.String("requestUrl", event.Request.URL),
+						zap.String("host", pausedURL.Host),
+						zap.Bool("isNavigate", event.Request.URL == navigateURL),
+						zap.Bool("hasPostData", event.Request.HasPostData))
+
+					if err != nil {
+						m.log.Error("failed to parse request URL", zap.String("requestUrl", event.Request.URL), zap.Error(err))
+						panic(err)
+					}
+
+					if event.Request.URL == navigateURL {
+						res = recorder
+
+					} else if shouldHandleResourceType(event.ResourceType) && (pausedURL.Host == r.Host || slices.Contains(m.FulfillHosts, pausedURL.Host)) {
+						var body io.Reader
+						if event.Request.HasPostData {
+							body = strings.NewReader(event.Request.PostData)
+						}
+						subRequest, err := http.NewRequestWithContext(reqContext, event.Request.Method, event.Request.URL, body)
+						if err != nil {
+							m.log.Error("failed to create sub request", zap.String("requestUrl", event.Request.URL), zap.Error(err))
+							panic(err)
+						}
+						_ = subRequest
+
+						for name, value := range event.Request.Headers {
+							subRequest.Header.Add(name, value.(string))
+						}
+
+						subResponse := &responseWriter{header: make(http.Header)}
+
+						server.ServeHTTP(subResponse, subRequest)
+
+						res = subResponse
+
+					} else if shouldHandleResourceType(event.ResourceType) && slices.Contains(m.ContinueHosts, pausedURL.Host) {
+						err = fetch.ContinueRequest(event.RequestID).Do(ctx)
+						if err != nil {
+							m.log.Error("failed to continue request", zap.String("requestUrl", event.Request.URL), zap.Error(err))
+							panic(err)
+						}
+						return
+
+					} else {
+						err := fetch.FailRequest(event.RequestID, network.ErrorReasonBlockedByClient).Do(ctx)
+						if err != nil {
+							m.log.Error("failed to fail request", zap.String("requestUrl", event.Request.URL), zap.Error(err))
+							panic(err)
+						}
+						return
+					}
+
+					fulfill := fetch.FulfillRequest(event.RequestID, int64(res.Status()))
+					fulfill.ResponseHeaders = make([]*fetch.HeaderEntry, 0, len(res.Header()))
+					for name, values := range res.Header() {
+						for _, value := range values {
+							fulfill.ResponseHeaders = append(fulfill.ResponseHeaders, &fetch.HeaderEntry{name, value})
+						}
+					}
+					fulfill.Body = base64.StdEncoding.EncodeToString(res.Buffer().Bytes())
+					err = fulfill.Do(ctx)
+					if err != nil {
+						m.log.Error("failed to fulfill request", zap.String("requestUrl", event.Request.URL), zap.Error(err))
+						panic(err)
+					}
+
+					m.log.Debug("request fulfilled", zap.String("requestUrl", event.Request.URL))
+				}()
+			case *runtime.EventExceptionThrown:
+				panic(errors.New(event.ExceptionDetails.Exception.Description))
 			}
-
-			go func() {
-				var res response
-				pausedURL, err := url.Parse(requestPaused.Request.URL)
-				m.log.Debug("request paused",
-					zap.String("requestUrl", requestPaused.Request.URL),
-					zap.String("host", pausedURL.Host),
-					zap.Bool("isNavigate", requestPaused.Request.URL == navigateURL),
-					zap.Bool("hasPostData", requestPaused.Request.HasPostData))
-
-				if err != nil {
-					m.log.Error("failed to parse request URL", zap.String("requestUrl", requestPaused.Request.URL), zap.Error(err))
-					panic(err)
-				}
-
-				if requestPaused.Request.URL == navigateURL {
-					res = recorder
-
-				} else if shouldHandleResourceType(requestPaused.ResourceType) && (pausedURL.Host == r.Host || slices.Contains(m.FulfillHosts, pausedURL.Host)) {
-					var body io.Reader
-					if requestPaused.Request.HasPostData {
-						body = strings.NewReader(requestPaused.Request.PostData)
-					}
-					subRequest, err := http.NewRequestWithContext(reqContext, requestPaused.Request.Method, requestPaused.Request.URL, body)
-					if err != nil {
-						m.log.Error("failed to create sub request", zap.String("requestUrl", requestPaused.Request.URL), zap.Error(err))
-						panic(err)
-					}
-					_ = subRequest
-
-					for name, value := range requestPaused.Request.Headers {
-						subRequest.Header.Add(name, value.(string))
-					}
-
-					subResponse := &responseWriter{header: make(http.Header)}
-
-					server.ServeHTTP(subResponse, subRequest)
-
-					res = subResponse
-
-				} else if shouldHandleResourceType(requestPaused.ResourceType) && slices.Contains(m.ContinueHosts, pausedURL.Host) {
-					err = fetch.ContinueRequest(requestPaused.RequestID).Do(ctx)
-					if err != nil {
-						m.log.Error("failed to continue request", zap.String("requestUrl", requestPaused.Request.URL), zap.Error(err))
-						panic(err)
-					}
-					return
-
-				} else {
-					err := fetch.FailRequest(requestPaused.RequestID, network.ErrorReasonBlockedByClient).Do(ctx)
-					if err != nil {
-						m.log.Error("failed to fail request", zap.String("requestUrl", requestPaused.Request.URL), zap.Error(err))
-						panic(err)
-					}
-					return
-				}
-
-				fulfill := fetch.FulfillRequest(requestPaused.RequestID, int64(res.Status()))
-				fulfill.ResponseHeaders = make([]*fetch.HeaderEntry, 0, len(res.Header()))
-				for name, values := range res.Header() {
-					for _, value := range values {
-						fulfill.ResponseHeaders = append(fulfill.ResponseHeaders, &fetch.HeaderEntry{name, value})
-					}
-				}
-				fulfill.Body = base64.StdEncoding.EncodeToString(res.Buffer().Bytes())
-				err = fulfill.Do(ctx)
-				if err != nil {
-					m.log.Error("failed to fulfill request", zap.String("requestUrl", requestPaused.Request.URL), zap.Error(err))
-					panic(err)
-				}
-
-				m.log.Debug("request fulfilled", zap.String("requestUrl", requestPaused.Request.URL))
-			}()
 		})
 		return nil
 	}))
@@ -178,14 +180,22 @@ func (m *Middleware) ServeHTTP(w http.ResponseWriter, r *http.Request, next cadd
 	if ua := r.UserAgent(); ua != "" {
 		tasks = append(tasks, emulation.SetUserAgentOverride(ua))
 	}
+	tasks = append(tasks, chromedp.ActionFunc(func(ctx context.Context) error {
+		_, err := page.AddScriptToEvaluateOnNewDocument(onNewDocumentScript).Do(ctx)
+		return err
+	}))
 	tasks = append(tasks, chromedp.Navigate(navigateURL))
+	tasks = append(tasks, chromedp.Evaluate("window.CaddyChrome.pendingTask", nil, func(p *runtime.EvaluateParams) *runtime.EvaluateParams {
+		p.AwaitPromise = true
+		return p
+	}))
 	tasks = append(tasks, chromedp.QueryAfter("html", func(ctx context.Context, execCtx runtime.ExecutionContextID, nodes ...*cdp.Node) error {
 		r, err := dom.ResolveNode().WithNodeID(nodes[0].NodeID).Do(ctx)
 		if err != nil {
 			return err
 		}
 		return chromedp.CallFunctionOn(
-			getHTMLFunction,
+			getHTMLScript,
 			&responseHTML,
 			func(p *runtime.CallFunctionOnParams) *runtime.CallFunctionOnParams {
 				return p.WithObjectID(r.ObjectID)

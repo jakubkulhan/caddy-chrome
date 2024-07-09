@@ -122,6 +122,13 @@ func TestMiddleware_ServeHTTP(t *testing.T) {
 				assert.Contains(t, body, `Hello from fetch POST component!`)
 			},
 		},
+		{
+			url: "http://localhost:9080/promise.html",
+			verifier: func(t *testing.T, res *http.Response, body string) {
+				assert.Contains(t, body, `<html>`)
+				assert.Contains(t, body, `Hello after a timeout!`)
+			},
+		},
 	} {
 		t.Run(testCase.url, func(t *testing.T) {
 			req, err := http.NewRequest("GET", testCase.url, nil)

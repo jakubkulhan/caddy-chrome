@@ -1,0 +1,23 @@
+<promise-component></promise-component>
+
+<script type="module">
+    // see https://github.com/webcomponents-cg/community-protocols/blob/main/proposals/pending-task.md
+    class PendingTaskEvent extends Event {
+        constructor(complete) {
+            super("pending-task", {bubbles: true, composed: true});
+            this.complete = complete;
+        }
+    }
+
+    class PromiseComponent extends HTMLElement {
+        connectedCallback() {
+            this.innerText = "Waiting...";
+            const promise = new Promise(resolve => setTimeout(() => {
+                this.innerText = "Hello " + "after a timeout!";
+                resolve();
+            }, 1000));
+            this.dispatchEvent(new PendingTaskEvent(promise));
+        }
+    }
+    customElements.define("promise-component", PromiseComponent);
+</script>
