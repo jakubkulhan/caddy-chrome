@@ -1,12 +1,15 @@
 package caddy_chrome
 
 import (
+	"context"
 	"fmt"
 	"github.com/caddyserver/caddy/v2"
 	"github.com/caddyserver/caddy/v2/caddyconfig/caddyfile"
 	"github.com/caddyserver/caddy/v2/caddyconfig/httpcaddyfile"
 	"github.com/caddyserver/caddy/v2/modules/caddyhttp"
+	"github.com/chromedp/chromedp"
 	"go.uber.org/zap"
+	"time"
 )
 
 func init() {
@@ -16,8 +19,9 @@ func init() {
 }
 
 type Middleware struct {
-	log       *zap.Logger
 	MIMETypes []string `json:"mime_types,omitempty"`
+	log       *zap.Logger
+	chromeCtx context.Context
 }
 
 func (Middleware) CaddyModule() caddy.ModuleInfo {
@@ -27,10 +31,38 @@ func (Middleware) CaddyModule() caddy.ModuleInfo {
 	}
 }
 
-func (m *Middleware) Provision(ctx caddy.Context) error {
-	m.log = ctx.Logger()
+func (m *Middleware) Provision(ctx caddy.Context) (err error) {
 	if len(m.MIMETypes) == 0 {
 		m.MIMETypes = []string{"text/html"}
+	}
+
+	m.log = ctx.Logger()
+
+	var cancel context.CancelFunc
+	m.chromeCtx, cancel = chromedp.NewExecAllocator(context.Background(), chromedp.DefaultExecAllocatorOptions[:]...)
+	m.chromeCtx, _ = chromedp.NewContext(m.chromeCtx)
+	defer func() {
+		if err != nil {
+			cancel()
+			m.chromeCtx = nil
+		}
+	}()
+	err = chromedp.Run(m.chromeCtx)
+	if err != nil {
+		return
+	}
+
+	return nil
+}
+
+func (m *Middleware) Cleanup() error {
+	if m.chromeCtx != nil {
+		tctx, tcancel := context.WithTimeout(m.chromeCtx, 10*time.Second)
+		defer tcancel()
+		if err := chromedp.Cancel(tctx); err != nil {
+			return err
+		}
+		m.chromeCtx = nil
 	}
 	return nil
 }
@@ -69,6 +101,7 @@ func (m *Middleware) UnmarshalCaddyfile(d *caddyfile.Dispenser) error {
 var (
 	_ caddy.Module          = (*Middleware)(nil)
 	_ caddy.Provisioner     = (*Middleware)(nil)
+	_ caddy.CleanerUpper    = (*Middleware)(nil)
 	_ caddy.Validator       = (*Middleware)(nil)
 	_ caddyfile.Unmarshaler = (*Middleware)(nil)
 )
