@@ -25,6 +25,12 @@ func TestMiddleware_UnmarshalCaddyfile(t *testing.T) {
 		},
 		{
 			caddyfile: `chrome {
+				timeout 10s
+			}`,
+			json: `{"timeout":"10s"}`,
+		},
+		{
+			caddyfile: `chrome {
 				mime_types text/html
 			}`,
 			json: `{"mime_types":["text/html"]}`,

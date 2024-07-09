@@ -20,12 +20,14 @@ func init() {
 }
 
 type Middleware struct {
+	Timeout       string         `json:"timeout,omitempty"`
 	MIMETypes     []string       `json:"mime_types,omitempty"`
 	ExecBrowser   *ExecBrowser   `json:"exec_browser,omitempty"`
 	RemoteBrowser *RemoteBrowser `json:"remote_browser,omitempty"`
 	FulfillHosts  []string       `json:"fulfill_hosts,omitempty"`
 	ContinueHosts []string       `json:"continue_hosts,omitempty"`
 	log           *zap.Logger
+	timeout       time.Duration
 	chromeCtx     context.Context
 }
 
@@ -59,6 +61,15 @@ func (m *Middleware) Provision(ctx caddy.Context) (err error) {
 	}
 
 	m.log = ctx.Logger()
+
+	if m.Timeout != "" {
+		m.timeout, err = time.ParseDuration(m.Timeout)
+		if err != nil {
+			return err
+		}
+	} else {
+		m.timeout = 10 * time.Second
+	}
 
 	var cancel context.CancelFunc
 	if m.ExecBrowser != nil {
@@ -98,9 +109,9 @@ func (m *Middleware) Provision(ctx caddy.Context) (err error) {
 
 func (m *Middleware) Cleanup() error {
 	if m.chromeCtx != nil {
-		tctx, tcancel := context.WithTimeout(m.chromeCtx, 10*time.Second)
-		defer tcancel()
-		if err := chromedp.Cancel(tctx); err != nil {
+		timeoutCtx, cancel := context.WithTimeout(m.chromeCtx, 10*time.Second)
+		defer cancel()
+		if err := chromedp.Cancel(timeoutCtx); err != nil {
 			return err
 		}
 		m.chromeCtx = nil
@@ -122,6 +133,11 @@ func (m *Middleware) UnmarshalCaddyfile(d *caddyfile.Dispenser) error {
 		for nesting := d.Nesting(); d.NextBlock(nesting); {
 			defaultFlags := true
 			switch d.Val() {
+			case "timeout":
+				if !d.NextArg() {
+					return d.ArgErr()
+				}
+				m.Timeout = d.Val()
 			case "mime_types":
 				m.MIMETypes = d.RemainingArgs()
 				if len(m.MIMETypes) == 0 {

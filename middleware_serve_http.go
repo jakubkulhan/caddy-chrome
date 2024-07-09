@@ -79,7 +79,10 @@ func (m *Middleware) ServeHTTP(w http.ResponseWriter, r *http.Request, next cadd
 
 	var responseHTML string
 
-	browserCtx, browserCancel := chromedp.NewContext(m.chromeCtx, chromedp.WithNewBrowserContext())
+	timeoutCtx, timeoutCancel := context.WithTimeout(m.chromeCtx, m.timeout)
+	defer timeoutCancel()
+
+	browserCtx, browserCancel := chromedp.NewContext(timeoutCtx, chromedp.WithNewBrowserContext())
 	defer browserCancel()
 
 	reqContext := r.Context()
