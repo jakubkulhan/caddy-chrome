@@ -17,6 +17,7 @@ import (
 	"mime"
 	"net/http"
 	"net/url"
+	"slices"
 	"sync"
 )
 
@@ -124,18 +125,10 @@ func (m *Middleware) ServeHTTP(w http.ResponseWriter, r *http.Request, next cadd
 					panic(err)
 				}
 
-				if pausedURL.Host != r.Host {
-					err := fetch.FailRequest(requestPaused.RequestID, network.ErrorReasonBlockedByClient).Do(ctx)
-					if err != nil {
-						m.log.Error("failed to fail request", zap.String("requestUrl", requestPaused.Request.URL), zap.Error(err))
-						panic(err)
-					}
-					return
-				}
-
 				if requestPaused.Request.URL == navigateURL {
 					res = recorder
-				} else {
+
+				} else if shouldHandleResourceType(requestPaused.ResourceType) && (pausedURL.Host == r.Host || slices.Contains(m.FulfillHosts, pausedURL.Host)) {
 					subRequest, err := http.NewRequestWithContext(reqContext, requestPaused.Request.Method, requestPaused.Request.URL, nil)
 					if err != nil {
 						m.log.Error("failed to create sub request", zap.String("requestUrl", requestPaused.Request.URL), zap.Error(err))
@@ -152,6 +145,22 @@ func (m *Middleware) ServeHTTP(w http.ResponseWriter, r *http.Request, next cadd
 					server.ServeHTTP(subResponse, subRequest)
 
 					res = subResponse
+
+				} else if shouldHandleResourceType(requestPaused.ResourceType) && slices.Contains(m.ContinueHosts, pausedURL.Host) {
+					err = fetch.ContinueRequest(requestPaused.RequestID).Do(ctx)
+					if err != nil {
+						m.log.Error("failed to continue request", zap.String("requestUrl", requestPaused.Request.URL), zap.Error(err))
+						panic(err)
+					}
+					return
+
+				} else {
+					err := fetch.FailRequest(requestPaused.RequestID, network.ErrorReasonBlockedByClient).Do(ctx)
+					if err != nil {
+						m.log.Error("failed to fail request", zap.String("requestUrl", requestPaused.Request.URL), zap.Error(err))
+						panic(err)
+					}
+					return
 				}
 
 				fulfill := fetch.FulfillRequest(requestPaused.RequestID, int64(res.Status()))
@@ -223,6 +232,19 @@ func (m *Middleware) ServeHTTP(w http.ResponseWriter, r *http.Request, next cadd
 	}
 
 	return nil
+}
+
+func shouldHandleResourceType(resourceType network.ResourceType) bool {
+	switch resourceType {
+	case network.ResourceTypeScript:
+		fallthrough
+	case network.ResourceTypeXHR:
+		fallthrough
+	case network.ResourceTypeFetch:
+		return true
+	default:
+		return false
+	}
 }
 
 var (

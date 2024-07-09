@@ -89,6 +89,30 @@ func TestMiddleware_UnmarshalCaddyfile(t *testing.T) {
 			}`,
 			json: `{"remote_browser":{"url":"http://localhost:9222/"}}`,
 		},
+		{
+			caddyfile: `chrome {
+				fulfill_hosts localhost
+			}`,
+			json: `{"fulfill_hosts":["localhost"]}`,
+		},
+		{
+			caddyfile: `chrome {
+				fulfill_hosts my.domain api.my.domain cdn.my.domain
+			}`,
+			json: `{"fulfill_hosts":["my.domain","api.my.domain","cdn.my.domain"]}`,
+		},
+		{
+			caddyfile: `chrome {
+				continue_hosts external-cdn.example.com
+			}`,
+			json: `{"continue_hosts":["external-cdn.example.com"]}`,
+		},
+		{
+			caddyfile: `chrome {
+				continue_hosts external-cdn.example.com analytics.example.com
+			}`,
+			json: `{"continue_hosts":["external-cdn.example.com","analytics.example.com"]}`,
+		},
 	} {
 		t.Run(re.ReplaceAllString(testCase.caddyfile, " "), func(t *testing.T) {
 			m := new(Middleware)

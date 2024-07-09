@@ -102,6 +102,8 @@ func TestMiddleware_ServeHTTP(t *testing.T) {
 		},
 	} {
 		t.Run(testCase.url, func(t *testing.T) {
+			t.Parallel()
+
 			req, err := http.NewRequest("GET", testCase.url, nil)
 			if err != nil {
 				t.Fatal(err)

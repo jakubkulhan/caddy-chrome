@@ -23,6 +23,8 @@ type Middleware struct {
 	MIMETypes     []string       `json:"mime_types,omitempty"`
 	ExecBrowser   *ExecBrowser   `json:"exec_browser,omitempty"`
 	RemoteBrowser *RemoteBrowser `json:"remote_browser,omitempty"`
+	FulfillHosts  []string       `json:"fulfill_hosts,omitempty"`
+	ContinueHosts []string       `json:"continue_hosts,omitempty"`
 	log           *zap.Logger
 	chromeCtx     context.Context
 }
@@ -152,6 +154,10 @@ func (m *Middleware) UnmarshalCaddyfile(d *caddyfile.Dispenser) error {
 				}
 				d.NextArg()
 				m.RemoteBrowser.URL = d.Val()
+			case "fulfill_hosts":
+				m.FulfillHosts = append(m.FulfillHosts, d.RemainingArgs()...)
+			case "continue_hosts":
+				m.ContinueHosts = append(m.ContinueHosts, d.RemainingArgs()...)
 			default:
 				return d.ArgErr()
 			}
