@@ -107,7 +107,8 @@ func (m *Middleware) ServeHTTP(w http.ResponseWriter, r *http.Request, next cadd
 
 					if err != nil {
 						m.log.Error("failed to parse request URL", zap.String("requestUrl", event.Request.URL), zap.Error(err))
-						panic(err)
+						browserCancel()
+						return
 					}
 
 					if event.Request.URL == navigateURL {
@@ -121,7 +122,8 @@ func (m *Middleware) ServeHTTP(w http.ResponseWriter, r *http.Request, next cadd
 						subRequest, err := http.NewRequestWithContext(reqContext, event.Request.Method, event.Request.URL, body)
 						if err != nil {
 							m.log.Error("failed to create sub request", zap.String("requestUrl", event.Request.URL), zap.Error(err))
-							panic(err)
+							browserCancel()
+							return
 						}
 						_ = subRequest
 
@@ -139,7 +141,7 @@ func (m *Middleware) ServeHTTP(w http.ResponseWriter, r *http.Request, next cadd
 						err = fetch.ContinueRequest(event.RequestID).Do(ctx)
 						if err != nil {
 							m.log.Error("failed to continue request", zap.String("requestUrl", event.Request.URL), zap.Error(err))
-							panic(err)
+							browserCancel()
 						}
 						return
 
@@ -147,7 +149,7 @@ func (m *Middleware) ServeHTTP(w http.ResponseWriter, r *http.Request, next cadd
 						err := fetch.FailRequest(event.RequestID, network.ErrorReasonBlockedByClient).Do(ctx)
 						if err != nil {
 							m.log.Error("failed to fail request", zap.String("requestUrl", event.Request.URL), zap.Error(err))
-							panic(err)
+							browserCancel()
 						}
 						return
 					}
@@ -163,13 +165,14 @@ func (m *Middleware) ServeHTTP(w http.ResponseWriter, r *http.Request, next cadd
 					err = fulfill.Do(ctx)
 					if err != nil {
 						m.log.Error("failed to fulfill request", zap.String("requestUrl", event.Request.URL), zap.Error(err))
-						panic(err)
+						browserCancel()
+						return
 					}
 
 					m.log.Debug("request fulfilled", zap.String("requestUrl", event.Request.URL))
 				}()
 			case *runtime.EventExceptionThrown:
-				panic(errors.New(event.ExceptionDetails.Exception.Description))
+				m.log.Error("exception thrown in runtime", zap.String("exceptionDetails", event.ExceptionDetails.Exception.Description))
 			}
 		})
 		return nil
