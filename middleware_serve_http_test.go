@@ -19,6 +19,14 @@ func TestMiddleware_ServeHTTP(t *testing.T) {
 			https_port 9443
 		}
 		http://localhost:9080, https://localhost:9443 {
+			@fetch_post {
+				method POST
+				path /fetch_post.json
+			}
+			handle @fetch_post {
+				respond {http.request.body}
+			}
+
 			chrome
 			root ./testdata
 			file_server
@@ -100,10 +108,22 @@ func TestMiddleware_ServeHTTP(t *testing.T) {
 				assert.Contains(t, body, `navigator.userAgent is [test user agent]`)
 			},
 		},
+		{
+			url: "http://localhost:9080/fetch_get.html",
+			verifier: func(t *testing.T, res *http.Response, body string) {
+				assert.Contains(t, body, `<html>`)
+				assert.Contains(t, body, `Hello from fetch GET component!`)
+			},
+		},
+		{
+			url: "http://localhost:9080/fetch_post.html",
+			verifier: func(t *testing.T, res *http.Response, body string) {
+				assert.Contains(t, body, `<html>`)
+				assert.Contains(t, body, `Hello from fetch POST component!`)
+			},
+		},
 	} {
 		t.Run(testCase.url, func(t *testing.T) {
-			t.Parallel()
-
 			req, err := http.NewRequest("GET", testCase.url, nil)
 			if err != nil {
 				t.Fatal(err)

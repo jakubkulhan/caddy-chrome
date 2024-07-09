@@ -1,0 +1,18 @@
+<fetch-component></fetch-component>
+
+<script type="module">
+    class FetchComponent extends HTMLElement {
+        connectedCallback() {
+            this.innerText = "Loading...";
+            fetch("fetch_get.json")
+                .then(response => response.json())
+                .then(data => {
+                    this.innerText = data.message;
+                })
+                .catch(error => {
+                    this.innerText = "Error: " + error;
+                });
+        }
+    }
+    customElements.define("fetch-component", FetchComponent);
+</script>

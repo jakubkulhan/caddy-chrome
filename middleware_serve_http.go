@@ -14,10 +14,12 @@ import (
 	"github.com/chromedp/chromedp"
 	"github.com/pkg/errors"
 	"go.uber.org/zap"
+	"io"
 	"mime"
 	"net/http"
 	"net/url"
 	"slices"
+	"strings"
 	"sync"
 )
 
@@ -118,7 +120,8 @@ func (m *Middleware) ServeHTTP(w http.ResponseWriter, r *http.Request, next cadd
 				m.log.Debug("request paused",
 					zap.String("requestUrl", requestPaused.Request.URL),
 					zap.String("host", pausedURL.Host),
-					zap.Bool("isNavigate", requestPaused.Request.URL == navigateURL))
+					zap.Bool("isNavigate", requestPaused.Request.URL == navigateURL),
+					zap.Bool("hasPostData", requestPaused.Request.HasPostData))
 
 				if err != nil {
 					m.log.Error("failed to parse request URL", zap.String("requestUrl", requestPaused.Request.URL), zap.Error(err))
@@ -129,7 +132,11 @@ func (m *Middleware) ServeHTTP(w http.ResponseWriter, r *http.Request, next cadd
 					res = recorder
 
 				} else if shouldHandleResourceType(requestPaused.ResourceType) && (pausedURL.Host == r.Host || slices.Contains(m.FulfillHosts, pausedURL.Host)) {
-					subRequest, err := http.NewRequestWithContext(reqContext, requestPaused.Request.Method, requestPaused.Request.URL, nil)
+					var body io.Reader
+					if requestPaused.Request.HasPostData {
+						body = strings.NewReader(requestPaused.Request.PostData)
+					}
+					subRequest, err := http.NewRequestWithContext(reqContext, requestPaused.Request.Method, requestPaused.Request.URL, body)
 					if err != nil {
 						m.log.Error("failed to create sub request", zap.String("requestUrl", requestPaused.Request.URL), zap.Error(err))
 						panic(err)
