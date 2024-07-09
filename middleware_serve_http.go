@@ -88,26 +88,9 @@ func (m *Middleware) ServeHTTP(w http.ResponseWriter, r *http.Request, next cadd
 	}()
 	server := reqContext.Value(caddyhttp.ServerCtxKey).(http.Handler)
 
-	err = chromedp.Run(browserCtx, chromedp.ActionFunc(func(ctx context.Context) error {
-		err := fetch.Enable().Do(ctx)
-		if err != nil {
-			return errors.Wrap(err, "failed to enable fetch")
-		}
-
-		for _, cookie := range r.Cookies() {
-			err = network.SetCookie(cookie.Name, cookie.Value).WithDomain(r.Host).Do(ctx)
-			if err != nil {
-				return errors.Wrap(err, "failed to set cookie")
-			}
-		}
-
-		if ua := r.UserAgent(); ua != "" {
-			err = emulation.SetUserAgentOverride(ua).Do(ctx)
-			if err != nil {
-				return errors.Wrap(err, "failed to set user agent")
-			}
-		}
-
+	var tasks chromedp.Tasks
+	tasks = append(tasks, fetch.Enable())
+	tasks = append(tasks, chromedp.ActionFunc(func(ctx context.Context) error {
 		chromedp.ListenTarget(ctx, func(event any) {
 			requestPaused, ok := event.(*fetch.EventRequestPaused)
 			if !ok {
@@ -187,31 +170,29 @@ func (m *Middleware) ServeHTTP(w http.ResponseWriter, r *http.Request, next cadd
 				m.log.Debug("request fulfilled", zap.String("requestUrl", requestPaused.Request.URL))
 			}()
 		})
-
-		err = chromedp.Navigate(navigateURL).Do(ctx)
-		if err != nil {
-			return errors.Wrap(err, "failed to navigate")
-		}
-
-		err = chromedp.QueryAfter("html", func(ctx context.Context, execCtx runtime.ExecutionContextID, nodes ...*cdp.Node) error {
-			r, err := dom.ResolveNode().WithNodeID(nodes[0].NodeID).Do(ctx)
-			if err != nil {
-				return err
-			}
-			return chromedp.CallFunctionOn(
-				getHTMLFunction,
-				&responseHTML,
-				func(p *runtime.CallFunctionOnParams) *runtime.CallFunctionOnParams {
-					return p.WithObjectID(r.ObjectID)
-				},
-			).Do(ctx)
-		}).Do(ctx)
-		if err != nil {
-			return errors.Wrap(err, "failed to query after")
-		}
-
 		return nil
 	}))
+	for _, cookie := range r.Cookies() {
+		tasks = append(tasks, network.SetCookie(cookie.Name, cookie.Value).WithDomain(r.Host))
+	}
+	if ua := r.UserAgent(); ua != "" {
+		tasks = append(tasks, emulation.SetUserAgentOverride(ua))
+	}
+	tasks = append(tasks, chromedp.Navigate(navigateURL))
+	tasks = append(tasks, chromedp.QueryAfter("html", func(ctx context.Context, execCtx runtime.ExecutionContextID, nodes ...*cdp.Node) error {
+		r, err := dom.ResolveNode().WithNodeID(nodes[0].NodeID).Do(ctx)
+		if err != nil {
+			return err
+		}
+		return chromedp.CallFunctionOn(
+			getHTMLFunction,
+			&responseHTML,
+			func(p *runtime.CallFunctionOnParams) *runtime.CallFunctionOnParams {
+				return p.WithObjectID(r.ObjectID)
+			},
+		).Do(ctx)
+	}))
+	err = chromedp.Run(browserCtx, tasks)
 	if err != nil {
 		return errors.Wrap(err, "failed to run chrome")
 	}
