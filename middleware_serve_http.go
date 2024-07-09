@@ -17,7 +17,14 @@ import (
 	"mime"
 	"net/http"
 	"net/url"
+	"sync"
 )
+
+var bufPool = sync.Pool{
+	New: func() interface{} {
+		return new(bytes.Buffer)
+	},
+}
 
 var skipHeaders = map[string]struct{}{
 	"Accept-Ranges":  {},
@@ -28,8 +35,11 @@ var skipHeaders = map[string]struct{}{
 }
 
 func (m *Middleware) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddyhttp.Handler) error {
-	var buf bytes.Buffer
-	recorder := caddyhttp.NewResponseRecorder(w, &buf, func(code int, header http.Header) bool {
+	buf := bufPool.Get().(*bytes.Buffer)
+	buf.Reset()
+	defer bufPool.Put(buf)
+
+	recorder := caddyhttp.NewResponseRecorder(w, buf, func(code int, header http.Header) bool {
 		if len(m.MIMETypes) == 0 {
 			return true
 		}

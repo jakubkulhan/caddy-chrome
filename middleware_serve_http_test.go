@@ -20,11 +20,11 @@ func TestMiddleware_ServeHTTP(t *testing.T) {
 		}
 		http://localhost:9080, https://localhost:9443 {
 			chrome
-			root ./test
+			root ./testdata
 			file_server
 		}`, "caddyfile")
 
-	var testCases = []struct {
+	for _, testCase := range []struct {
 		url              string
 		verifier         func(*testing.T, *http.Response, string)
 		configureRequest func(*http.Request) error
@@ -100,9 +100,7 @@ func TestMiddleware_ServeHTTP(t *testing.T) {
 				assert.Contains(t, body, `navigator.userAgent is [test user agent]`)
 			},
 		},
-	}
-
-	for _, testCase := range testCases {
+	} {
 		t.Run(testCase.url, func(t *testing.T) {
 			req, err := http.NewRequest("GET", testCase.url, nil)
 			if err != nil {
