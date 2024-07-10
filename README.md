@@ -2,7 +2,9 @@
 
 > Caddy middleware to server-side render Javascript applications using Chrome
 
-The middleware takes an HTML response from the upstream handlers, loads it up in Chrome, and intercepts requests from the browser. Requests to the same host are routed internally in the webserver, possibly loading files, but also speaking to other applications e.g. by a reverse proxy. After the page is fully loaded, DOM is serialized to an HTML and the returned back to the client as the response.
+## Server-side rendering
+
+The middleware takes an HTML response from the upstream handlers, loads it up in Chrome on the server, and intercepts requests from the browser. Requests to the same host are routed internally in the webserver, possibly loading files, but also speaking to other applications e.g. by a reverse proxy. After the page is fully loaded, DOM is serialized to an HTML and then returned back to the client as the response.
 
 ```mermaid
 sequenceDiagram
@@ -28,7 +30,11 @@ sequenceDiagram
 
 ## Asynchronous components
 
-The middleware handles asynchronous components on the page using [`pending-task` protocol](https://github.com/webcomponents-cg/community-protocols/blob/main/proposals/pending-task.md). For an example, see [promise.html](testdata/promise.html).
+The middleware handles asynchronous components on the page using [`pending-task` protocol](https://github.com/webcomponents-cg/community-protocols/blob/main/proposals/pending-task.md). For an example, see [pending_task.html](testdata/pending_task.html).
+
+## Resource hints
+
+Because Chrome on the server loads up the page the same way as the browser on the client, we can know what resources the page needs. Therefore, to speed up loading on the client side, the middleware adds [preload](https://developer.mozilla.org/en-US/docs/Web/HTML/Attributes/rel/preload) and [preconnect](https://developer.mozilla.org/en-US/docs/Web/HTML/Attributes/rel/preconnect) resource hints as Link HTTP headers.
 
 ## Configuration
 

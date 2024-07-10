@@ -5,6 +5,7 @@ import (
 	"github.com/caddyserver/caddy/v2/caddytest"
 	"io"
 	"net/http"
+	"slices"
 	"testing"
 )
 
@@ -123,10 +124,27 @@ func TestMiddleware_ServeHTTP(t *testing.T) {
 			},
 		},
 		{
-			url: "http://localhost:9080/promise.html",
+			url: "http://localhost:9080/pending_task.html",
 			verifier: func(t *testing.T, res *http.Response, body string) {
 				assert.Contains(t, body, `<html>`)
 				assert.Contains(t, body, `Hello after a timeout!`)
+			},
+		},
+		{
+			url: "http://localhost:9080/links.html",
+			verifier: func(t *testing.T, res *http.Response, body string) {
+				linkHeaders := res.Header.Values("Link")
+				slices.Sort(linkHeaders)
+				assert.Equal(
+					t,
+					[]string{
+						"<http://localhost:9080/links.css>; rel=preload; as=style",
+						"<http://localhost:9080/links.jpg>; rel=preload; as=image",
+						"<http://localhost:9080/links.js>; rel=preload; as=script",
+						"<https://www.googletagmanager.com>; rel=preconnect",
+					},
+					linkHeaders,
+				)
 			},
 		},
 	} {

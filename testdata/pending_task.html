@@ -1,4 +1,4 @@
-<promise-component></promise-component>
+<pending-task-component></pending-task-component>
 
 <script type="module">
     // see https://github.com/webcomponents-cg/community-protocols/blob/main/proposals/pending-task.md
@@ -9,7 +9,7 @@
         }
     }
 
-    class PromiseComponent extends HTMLElement {
+    class PendingTaskComponent extends HTMLElement {
         connectedCallback() {
             this.innerText = "Waiting...";
             const promise = new Promise(resolve => setTimeout(() => {
@@ -19,5 +19,5 @@
             this.dispatchEvent(new PendingTaskEvent(promise));
         }
     }
-    customElements.define("promise-component", PromiseComponent);
+    customElements.define("pending-task-component", PendingTaskComponent);
 </script>

@@ -92,6 +92,8 @@ func (m *Middleware) ServeHTTP(w http.ResponseWriter, r *http.Request, next cadd
 	}()
 	server := reqContext.Value(caddyhttp.ServerCtxKey).(http.Handler)
 
+	links := newLinks()
+
 	var tasks chromedp.Tasks
 	tasks = append(tasks, fetch.Enable())
 	tasks = append(tasks, runtime.Enable())
@@ -104,7 +106,6 @@ func (m *Middleware) ServeHTTP(w http.ResponseWriter, r *http.Request, next cadd
 					pausedURL, err := url.Parse(event.Request.URL)
 					m.log.Debug("request paused",
 						zap.String("requestUrl", event.Request.URL),
-						zap.String("host", pausedURL.Host),
 						zap.Bool("isNavigate", event.Request.URL == navigateURL),
 						zap.Bool("hasPostData", event.Request.HasPostData))
 
@@ -118,6 +119,12 @@ func (m *Middleware) ServeHTTP(w http.ResponseWriter, r *http.Request, next cadd
 						res = recorder
 
 					} else if shouldHandleResourceType(event.ResourceType) && (pausedURL.Host == r.Host || slices.Contains(m.FulfillHosts, pausedURL.Host)) {
+						if pausedURL.Host == r.Host {
+							links.AddResource(event.Request.URL, event.ResourceType)
+						} else {
+							links.AddPreconnect(pausedURL.Scheme + "://" + pausedURL.Host)
+						}
+
 						var body io.Reader
 						if event.Request.HasPostData {
 							body = strings.NewReader(event.Request.PostData)
@@ -141,19 +148,33 @@ func (m *Middleware) ServeHTTP(w http.ResponseWriter, r *http.Request, next cadd
 						res = subResponse
 
 					} else if shouldHandleResourceType(event.ResourceType) && slices.Contains(m.ContinueHosts, pausedURL.Host) {
+						links.AddPreconnect(pausedURL.Scheme + "://" + pausedURL.Host)
+
 						err = fetch.ContinueRequest(event.RequestID).Do(ctx)
 						if err != nil {
 							m.log.Error("failed to continue request", zap.String("requestUrl", event.Request.URL), zap.Error(err))
 							browserCancel()
 						}
+
+						m.log.Debug("request continued", zap.String("requestUrl", event.Request.URL))
+
 						return
 
 					} else {
+						if pausedURL.Host == r.Host {
+							links.AddResource(event.Request.URL, event.ResourceType)
+						} else {
+							links.AddPreconnect(pausedURL.Scheme + "://" + pausedURL.Host)
+						}
+
 						err := fetch.FailRequest(event.RequestID, network.ErrorReasonBlockedByClient).Do(ctx)
 						if err != nil {
-							m.log.Error("failed to fail request", zap.String("requestUrl", event.Request.URL), zap.Error(err))
+							m.log.Error("failed to block request", zap.String("requestUrl", event.Request.URL), zap.Error(err))
 							browserCancel()
 						}
+
+						m.log.Debug("request blocked", zap.String("requestUrl", event.Request.URL))
+
 						return
 					}
 
@@ -225,6 +246,8 @@ func (m *Middleware) ServeHTTP(w http.ResponseWriter, r *http.Request, next cadd
 			w.Header().Add(name, value)
 		}
 	}
+
+	links.MakeHeaders(w.Header())
 
 	w.WriteHeader(recorder.Status())
 
