@@ -7,6 +7,7 @@ import (
 	"github.com/caddyserver/caddy/v2/caddyconfig/caddyfile"
 	"github.com/caddyserver/caddy/v2/caddyconfig/httpcaddyfile"
 	"github.com/caddyserver/caddy/v2/modules/caddyhttp"
+	"github.com/chromedp/cdproto/browser"
 	"github.com/chromedp/chromedp"
 	"go.uber.org/zap"
 	"strings"
@@ -99,7 +100,19 @@ func (m *Middleware) Provision(ctx caddy.Context) (err error) {
 			m.chromeCtx = nil
 		}
 	}()
-	err = chromedp.Run(m.chromeCtx)
+	err = chromedp.Run(m.chromeCtx, chromedp.ActionFunc(func(ctx context.Context) error {
+		protocolVersion, product, revision, userAgent, jsVersion, err := browser.GetVersion().Do(ctx)
+		if err != nil {
+			return err
+		}
+		m.log.Info("browser connected",
+			zap.String("protocol_version", protocolVersion),
+			zap.String("product", product),
+			zap.String("revision", revision),
+			zap.String("user_agent", userAgent),
+			zap.String("js_version", jsVersion))
+		return nil
+	}))
 	if err != nil {
 		return
 	}

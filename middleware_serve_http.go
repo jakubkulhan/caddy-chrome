@@ -67,7 +67,7 @@ func (m *Middleware) ServeHTTP(w http.ResponseWriter, r *http.Request, next cadd
 		return nil
 	}
 
-	m.log.Debug("got response", zap.String("response", buf.String()), zap.String("contentType", recorder.Header().Get("Content-Type")))
+	m.log.Debug("got response", zap.String("response", buf.String()), zap.String("content_type", recorder.Header().Get("Content-Type")))
 
 	var scheme string
 	if r.TLS == nil {
@@ -105,12 +105,12 @@ func (m *Middleware) ServeHTTP(w http.ResponseWriter, r *http.Request, next cadd
 					var res response
 					pausedURL, err := url.Parse(event.Request.URL)
 					m.log.Debug("request paused",
-						zap.String("requestUrl", event.Request.URL),
-						zap.Bool("isNavigate", event.Request.URL == navigateURL),
-						zap.Bool("hasPostData", event.Request.HasPostData))
+						zap.String("request_url", event.Request.URL),
+						zap.Bool("is_navigate", event.Request.URL == navigateURL),
+						zap.Bool("has_post_data", event.Request.HasPostData))
 
 					if err != nil {
-						m.log.Error("failed to parse request URL", zap.String("requestUrl", event.Request.URL), zap.Error(err))
+						m.log.Error("failed to parse request URL", zap.String("request_url", event.Request.URL), zap.Error(err))
 						browserCancel()
 						return
 					}
@@ -131,7 +131,7 @@ func (m *Middleware) ServeHTTP(w http.ResponseWriter, r *http.Request, next cadd
 						}
 						subRequest, err := http.NewRequestWithContext(reqContext, event.Request.Method, event.Request.URL, body)
 						if err != nil {
-							m.log.Error("failed to create sub request", zap.String("requestUrl", event.Request.URL), zap.Error(err))
+							m.log.Error("failed to create sub request", zap.String("request_url", event.Request.URL), zap.Error(err))
 							browserCancel()
 							return
 						}
@@ -152,11 +152,11 @@ func (m *Middleware) ServeHTTP(w http.ResponseWriter, r *http.Request, next cadd
 
 						err = fetch.ContinueRequest(event.RequestID).Do(ctx)
 						if err != nil {
-							m.log.Error("failed to continue request", zap.String("requestUrl", event.Request.URL), zap.Error(err))
+							m.log.Error("failed to continue request", zap.String("request_url", event.Request.URL), zap.Error(err))
 							browserCancel()
 						}
 
-						m.log.Debug("request continued", zap.String("requestUrl", event.Request.URL))
+						m.log.Debug("request continued", zap.String("request_url", event.Request.URL))
 
 						return
 
@@ -169,11 +169,11 @@ func (m *Middleware) ServeHTTP(w http.ResponseWriter, r *http.Request, next cadd
 
 						err := fetch.FailRequest(event.RequestID, network.ErrorReasonBlockedByClient).Do(ctx)
 						if err != nil {
-							m.log.Error("failed to block request", zap.String("requestUrl", event.Request.URL), zap.Error(err))
+							m.log.Error("failed to block request", zap.String("request_url", event.Request.URL), zap.Error(err))
 							browserCancel()
 						}
 
-						m.log.Debug("request blocked", zap.String("requestUrl", event.Request.URL))
+						m.log.Debug("request blocked", zap.String("request_url", event.Request.URL))
 
 						return
 					}
@@ -188,15 +188,15 @@ func (m *Middleware) ServeHTTP(w http.ResponseWriter, r *http.Request, next cadd
 					fulfill.Body = base64.StdEncoding.EncodeToString(res.Buffer().Bytes())
 					err = fulfill.Do(ctx)
 					if err != nil {
-						m.log.Error("failed to fulfill request", zap.String("requestUrl", event.Request.URL), zap.Error(err))
+						m.log.Error("failed to fulfill request", zap.String("request_url", event.Request.URL), zap.Error(err))
 						browserCancel()
 						return
 					}
 
-					m.log.Debug("request fulfilled", zap.String("requestUrl", event.Request.URL))
+					m.log.Debug("request fulfilled", zap.String("request_url", event.Request.URL))
 				}()
 			case *runtime.EventExceptionThrown:
-				m.log.Error("exception thrown in runtime", zap.String("exceptionDetails", event.ExceptionDetails.Exception.Description))
+				m.log.Error("exception thrown in runtime", zap.String("exception_details", event.ExceptionDetails.Exception.Description))
 			}
 		})
 		return nil
