@@ -5,7 +5,6 @@ import (
 	"context"
 	"encoding/base64"
 	"github.com/caddyserver/caddy/v2/modules/caddyhttp"
-	"github.com/chromedp/cdproto/cdp"
 	"github.com/chromedp/cdproto/dom"
 	"github.com/chromedp/cdproto/emulation"
 	"github.com/chromedp/cdproto/fetch"
@@ -76,8 +75,6 @@ func (m *Middleware) ServeHTTP(w http.ResponseWriter, r *http.Request, next cadd
 		scheme = "https"
 	}
 	navigateURL := scheme + "://" + r.Host + r.RequestURI
-
-	var responseHTML string
 
 	timeoutCtx, timeoutCancel := context.WithTimeout(m.chromeCtx, m.timeout)
 	defer timeoutCancel()
@@ -216,18 +213,14 @@ func (m *Middleware) ServeHTTP(w http.ResponseWriter, r *http.Request, next cadd
 		p.AwaitPromise = true
 		return p
 	}))
-	tasks = append(tasks, chromedp.QueryAfter("html", func(ctx context.Context, execCtx runtime.ExecutionContextID, nodes ...*cdp.Node) error {
-		r, err := dom.ResolveNode().WithNodeID(nodes[0].NodeID).Do(ctx)
+	var serializer *domSerializer
+	tasks = append(tasks, chromedp.ActionFunc(func(ctx context.Context) error {
+		root, err := dom.GetDocument().WithDepth(-1).WithPierce(true).Do(ctx)
 		if err != nil {
 			return err
 		}
-		return chromedp.CallFunctionOn(
-			getHTMLScript,
-			&responseHTML,
-			func(p *runtime.CallFunctionOnParams) *runtime.CallFunctionOnParams {
-				return p.WithObjectID(r.ObjectID)
-			},
-		).Do(ctx)
+		serializer = &domSerializer{root: root}
+		return nil
 	}))
 	err = chromedp.Run(browserCtx, tasks)
 	if err != nil {
@@ -251,11 +244,8 @@ func (m *Middleware) ServeHTTP(w http.ResponseWriter, r *http.Request, next cadd
 
 	w.WriteHeader(recorder.Status())
 
-	if _, err := w.Write([]byte("<!doctype html>\n")); err != nil {
-		return err
-	}
-	if _, err := w.Write([]byte(responseHTML)); err != nil {
-		return err
+	if err := serializer.Serialize(w); err != nil {
+		return errors.Wrap(err, "failed to serialize")
 	}
 
 	return nil

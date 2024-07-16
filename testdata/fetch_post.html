@@ -1,20 +1,25 @@
 <fetch-component></fetch-component>
 
 <script type="module">
+    import {PendingTaskEvent} from "./pending_task.js";
+
     class FetchComponent extends HTMLElement {
         connectedCallback() {
             this.innerText = "Loading...";
-            fetch("fetch_post.json", {
-                method: "POST",
-                body: JSON.stringify({ message: "Hello from " + "fetch POST component!" }),
-            })
-                .then(response => response.json())
-                .then(data => {
-                    this.innerText = data.message;
+
+            this.dispatchEvent(new PendingTaskEvent(
+                fetch("fetch_post.json", {
+                    method: "POST",
+                    body: JSON.stringify({ message: "Hello from " + "fetch POST component!" }),
                 })
-                .catch(error => {
-                    this.innerText = "Error: " + error;
-                });
+                    .then(response => response.json())
+                    .then(data => {
+                        this.innerText = data.message;
+                    })
+                    .catch(error => {
+                        this.innerText = "Error: " + error;
+                    })
+            ));
         }
     }
     customElements.define("fetch-component", FetchComponent);

@@ -5,9 +5,9 @@ export default class MyComponent extends HTMLElement {
 
     constructor() {
         super();
-        this.attachShadow({mode: "open", serializable: true});
+        this.attachShadow({mode: "open"});
         const h1 = document.createElement("h1");
         h1.textContent = "Hello from Web Component";
-        this.shadowRoot.appendChild(h1);
+        this.shadowRoot.innerHTML = `<h1>Hello from Web Component</h1><slot></slot>`;
     }
 }

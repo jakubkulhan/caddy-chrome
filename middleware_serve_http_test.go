@@ -88,6 +88,22 @@ func TestMiddleware_ServeHTTP(t *testing.T) {
 			},
 		},
 		{
+			url: "http://localhost:9080/shadow_dom_nested.html",
+			verifier: func(t *testing.T, res *http.Response, body string) {
+				assert.Contains(t, body, `<html>`)
+				assert.Contains(t, body, `<template shadowrootmode="open"`)
+				assert.Contains(t, body, `<h1>Hello from main component</h1>`)
+				assert.Contains(t, body, `<p>Hello from nested component</p>`)
+			},
+		},
+		{
+			url: "http://localhost:9080/shadow_dom_server.html",
+			verifier: func(t *testing.T, res *http.Response, body string) {
+				assert.Contains(t, body, `<template shadowrootmode="open"`)
+				assert.Contains(t, body, `<p>slot default</p>`)
+			},
+		},
+		{
 			url: "http://localhost:9080/cookie.html",
 			configureRequest: func(req *http.Request) error {
 				req.AddCookie(&http.Cookie{Name: "test", Value: "cookie"})
@@ -145,6 +161,13 @@ func TestMiddleware_ServeHTTP(t *testing.T) {
 					},
 					linkHeaders,
 				)
+			},
+		},
+		{
+			url: "http://localhost:9080/attribute_namespace.html",
+			verifier: func(t *testing.T, res *http.Response, body string) {
+				assert.Contains(t, body, `</html>`)
+				assert.Contains(t, body, `<div foo:bar="baz">`)
 			},
 		},
 	} {

@@ -1,13 +1,7 @@
 <pending-task-component></pending-task-component>
 
 <script type="module">
-    // see https://github.com/webcomponents-cg/community-protocols/blob/main/proposals/pending-task.md
-    class PendingTaskEvent extends Event {
-        constructor(complete) {
-            super("pending-task", {bubbles: true, composed: true});
-            this.complete = complete;
-        }
-    }
+    import { PendingTaskEvent } from "./pending_task.js";
 
     class PendingTaskComponent extends HTMLElement {
         connectedCallback() {
