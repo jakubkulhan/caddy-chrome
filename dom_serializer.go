@@ -42,6 +42,8 @@ func (s *domSerializer) serializeNode(w io.Writer, node *cdp.Node) error {
 		return s.serializeElementNode(w, node)
 	case cdp.NodeTypeText:
 		return s.serializeTextNode(w, node)
+	case cdp.NodeTypeComment:
+		return s.serializeComment(w, node)
 	case cdp.NodeTypeDocument:
 		return s.serializeDocumentNode(w, node)
 	case cdp.NodeTypeDocumentType:
@@ -187,6 +189,19 @@ func (s *domSerializer) serializeTextNode(w io.Writer, node *cdp.Node) error {
 		text = html.EscapeString(node.NodeValue)
 	}
 	if _, err := w.Write([]byte(text)); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (s *domSerializer) serializeComment(w io.Writer, node *cdp.Node) error {
+	if _, err := w.Write([]byte("<!--")); err != nil {
+		return err
+	}
+	if _, err := w.Write([]byte(node.NodeValue)); err != nil {
+		return err
+	}
+	if _, err := w.Write([]byte("-->")); err != nil {
 		return err
 	}
 	return nil
