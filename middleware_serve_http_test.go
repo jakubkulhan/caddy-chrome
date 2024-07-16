@@ -140,13 +140,6 @@ func TestMiddleware_ServeHTTP(t *testing.T) {
 			},
 		},
 		{
-			url: "http://localhost:9080/pending_task.html",
-			verifier: func(t *testing.T, res *http.Response, body string) {
-				assert.Contains(t, body, `<html>`)
-				assert.Contains(t, body, `Hello after a timeout!`)
-			},
-		},
-		{
 			url: "http://localhost:9080/links.html",
 			verifier: func(t *testing.T, res *http.Response, body string) {
 				linkHeaders := res.Header.Values("Link")
@@ -176,6 +169,43 @@ func TestMiddleware_ServeHTTP(t *testing.T) {
 				assert.Contains(t, body, `</html>`)
 				assert.NotContains(t, body, `<template shadowrootmode`)
 				assert.Contains(t, body, `<input required />`)
+			},
+		},
+		{
+			url: "http://localhost:9080/attribute_escape.html",
+			verifier: func(t *testing.T, res *http.Response, body string) {
+				assert.Contains(t, body, `</html>`)
+				assert.Contains(t, body, `data-json="{&#34;foo&#34;:&#34;bar&#34;}"`)
+				assert.Contains(t, body, `data-existing-json="{&#34;baz&#34;:&#34;qux&#34;}"`)
+			},
+		},
+		{
+			url: "http://localhost:9080/text_escape.html",
+			verifier: func(t *testing.T, res *http.Response, body string) {
+				assert.Contains(t, body, `</html>`)
+				assert.Contains(t, body, `Left: &lt;`)
+				assert.Contains(t, body, `Right: &gt;`)
+				assert.Contains(t, body, `Amp: &amp;`)
+				assert.Contains(t, body, `Double quote: &#34;`)
+				assert.Contains(t, body, `Single quote: &#39;`)
+			},
+		},
+		{
+			url: "http://localhost:9080/text_noescape_script.html",
+			verifier: func(t *testing.T, res *http.Response, body string) {
+				assert.Contains(t, body, `</html>`)
+				assert.Contains(t, body, `Left: <`)
+				assert.Contains(t, body, `Right: >`)
+				assert.Contains(t, body, `Amp: &`)
+				assert.Contains(t, body, `Double quote: "`)
+				assert.Contains(t, body, `Single quote: '`)
+			},
+		},
+		{
+			url: "http://localhost:9080/pending_task.html",
+			verifier: func(t *testing.T, res *http.Response, body string) {
+				assert.Contains(t, body, `<html>`)
+				assert.Contains(t, body, `Hello after a timeout!`)
 			},
 		},
 	} {

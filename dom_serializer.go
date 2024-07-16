@@ -29,6 +29,7 @@ var voidElements = map[string]bool{
 type domSerializer struct {
 	root           *cdp.Node
 	doctypeWritten bool
+	noEscape       bool
 }
 
 func (s *domSerializer) Serialize(w io.Writer) error {
@@ -128,6 +129,13 @@ func (s *domSerializer) serializeElementNode(w io.Writer, node *cdp.Node) error 
 	}
 
 	// children
+	if localName == "script" {
+		savedNoEscape := s.noEscape
+		s.noEscape = true
+		defer func() {
+			s.noEscape = savedNoEscape
+		}()
+	}
 	if err := s.serializeChildren(w, node); err != nil {
 		return err
 	}
@@ -172,7 +180,12 @@ func (s *domSerializer) serializeDocumentTypeNode(w io.Writer, node *cdp.Node) e
 }
 
 func (s *domSerializer) serializeTextNode(w io.Writer, node *cdp.Node) error {
-	text := html.EscapeString(node.NodeValue)
+	var text string
+	if s.noEscape {
+		text = node.NodeValue
+	} else {
+		text = html.EscapeString(node.NodeValue)
+	}
 	if _, err := w.Write([]byte(text)); err != nil {
 		return err
 	}

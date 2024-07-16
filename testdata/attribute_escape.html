@@ -1,0 +1,4 @@
+<div id="x" data-existing-json="{&quot;baz&quot;:&quot;qux&quot;}"></div>
+<script type="module">
+    document.getElementById("x").dataset.json = JSON.stringify({foo: "bar"});
+</script>
