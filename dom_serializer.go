@@ -80,15 +80,17 @@ func (s *domSerializer) serializeElementNode(w io.Writer, node *cdp.Node) error 
 		if _, err := w.Write([]byte(attributeName)); err != nil {
 			return err
 		}
-		if _, err := w.Write([]byte(`="`)); err != nil {
-			return err
-		}
-		attributeValue := html.EscapeString(node.Attributes[i+1])
-		if _, err := w.Write([]byte(attributeValue)); err != nil {
-			return err
-		}
-		if _, err := w.Write([]byte(`"`)); err != nil {
-			return err
+		if node.Attributes[i+1] != "" {
+			if _, err := w.Write([]byte(`="`)); err != nil {
+				return err
+			}
+			attributeValue := html.EscapeString(node.Attributes[i+1])
+			if _, err := w.Write([]byte(attributeValue)); err != nil {
+				return err
+			}
+			if _, err := w.Write([]byte(`"`)); err != nil {
+				return err
+			}
 		}
 	}
 	isVoid := voidElements[strings.ToLower(localName)]
@@ -104,6 +106,10 @@ func (s *domSerializer) serializeElementNode(w io.Writer, node *cdp.Node) error 
 
 	// shadow roots
 	for _, shadowRoot := range node.ShadowRoots {
+		if shadowRoot.ShadowRootType != "open" && shadowRoot.ShadowRootType != "closed" {
+			continue
+		}
+
 		if _, err := w.Write([]byte(`<template shadowrootmode="`)); err != nil {
 			return err
 		}

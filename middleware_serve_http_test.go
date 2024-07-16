@@ -170,6 +170,14 @@ func TestMiddleware_ServeHTTP(t *testing.T) {
 				assert.Contains(t, body, `<div foo:bar="baz">`)
 			},
 		},
+		{
+			url: "http://localhost:9080/attribute_boolean.html",
+			verifier: func(t *testing.T, res *http.Response, body string) {
+				assert.Contains(t, body, `</html>`)
+				assert.NotContains(t, body, `<template shadowrootmode`)
+				assert.Contains(t, body, `<input required />`)
+			},
+		},
 	} {
 		t.Run(testCase.url, func(t *testing.T) {
 			req, err := http.NewRequest("GET", testCase.url, nil)
