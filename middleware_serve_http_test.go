@@ -202,6 +202,13 @@ func TestMiddleware_ServeHTTP(t *testing.T) {
 			},
 		},
 		{
+			url: "http://localhost:9080/text_noescape_style.html",
+			verifier: func(t *testing.T, res *http.Response, body string) {
+				assert.Contains(t, body, `</html>`)
+				assert.Contains(t, body, `ul > li {`)
+			},
+		},
+		{
 			url: "http://localhost:9080/pending_task.html",
 			verifier: func(t *testing.T, res *http.Response, body string) {
 				assert.Contains(t, body, `<html>`)

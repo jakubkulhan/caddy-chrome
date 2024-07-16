@@ -129,7 +129,7 @@ func (s *domSerializer) serializeElementNode(w io.Writer, node *cdp.Node) error 
 	}
 
 	// children
-	if localName == "script" {
+	if localName == "script" || localName == "style" {
 		savedNoEscape := s.noEscape
 		s.noEscape = true
 		defer func() {
