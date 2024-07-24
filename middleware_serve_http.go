@@ -17,6 +17,7 @@ import (
 	"io"
 	"mime"
 	"net/http"
+	"net/http/httptest"
 	"net/url"
 	"slices"
 	"strings"
@@ -126,14 +127,7 @@ func (m *Middleware) ServeHTTP(w http.ResponseWriter, r *http.Request, next cadd
 						if event.Request.HasPostData {
 							body = strings.NewReader(event.Request.PostData)
 						}
-						subRequest, err := http.NewRequestWithContext(reqContext, event.Request.Method, event.Request.URL, body)
-						if err != nil {
-							m.log.Error("failed to create sub request", zap.String("request_url", event.Request.URL), zap.Error(err))
-							browserCancel()
-							return
-						}
-						_ = subRequest
-
+						subRequest := httptest.NewRequest(event.Request.Method, event.Request.URL, body).WithContext(reqContext)
 						for name, value := range event.Request.Headers {
 							subRequest.Header.Add(name, value.(string))
 						}

@@ -37,7 +37,12 @@ func (r *responseWriter) Buffer() *bytes.Buffer {
 	return &r.buffer
 }
 
+func (r *responseWriter) Flush() {
+
+}
+
 var (
 	_ http.ResponseWriter = (*responseWriter)(nil)
 	_ response            = (*responseWriter)(nil)
+	_ http.Flusher        = (*responseWriter)(nil)
 )
