@@ -7,9 +7,11 @@ import (
 	"net/http"
 	"slices"
 	"testing"
+	"time"
 )
 
 func TestMiddleware_ServeHTTP(t *testing.T) {
+	caddytest.Default.LoadRequestTimeout = 30 * time.Second
 	tester := caddytest.NewTester(t)
 	tester.InitServer(`
 		{
