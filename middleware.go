@@ -27,6 +27,7 @@ type Middleware struct {
 	RemoteBrowser *RemoteBrowser `json:"remote_browser,omitempty"`
 	FulfillHosts  []string       `json:"fulfill_hosts,omitempty"`
 	ContinueHosts []string       `json:"continue_hosts,omitempty"`
+	Links         bool           `json:"links,omitempty"`
 	log           *zap.Logger
 	timeout       time.Duration
 	chromeCtx     context.Context
@@ -187,6 +188,11 @@ func (m *Middleware) UnmarshalCaddyfile(d *caddyfile.Dispenser) error {
 				m.FulfillHosts = append(m.FulfillHosts, d.RemainingArgs()...)
 			case "continue_hosts":
 				m.ContinueHosts = append(m.ContinueHosts, d.RemainingArgs()...)
+			case "links":
+				m.Links = true
+				if d.CountRemainingArgs() != 0 {
+					return d.ArgErr()
+				}
 			default:
 				return d.ArgErr()
 			}

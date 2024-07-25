@@ -119,6 +119,12 @@ func TestMiddleware_UnmarshalCaddyfile(t *testing.T) {
 			}`,
 			json: `{"continue_hosts":["external-cdn.example.com","analytics.example.com"]}`,
 		},
+		{
+			caddyfile: `chrome {
+				links
+			}`,
+			json: `{"links":true}`,
+		},
 	} {
 		t.Run(re.ReplaceAllString(testCase.caddyfile, " "), func(t *testing.T) {
 			m := new(Middleware)

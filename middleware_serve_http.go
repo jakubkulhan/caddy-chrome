@@ -234,7 +234,9 @@ func (m *Middleware) ServeHTTP(w http.ResponseWriter, r *http.Request, next cadd
 		}
 	}
 
-	links.MakeHeaders(w.Header())
+	if m.Links {
+		links.MakeHeaders(w.Header())
+	}
 
 	w.WriteHeader(recorder.Status())
 

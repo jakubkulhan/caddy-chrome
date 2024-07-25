@@ -30,7 +30,9 @@ func TestMiddleware_ServeHTTP(t *testing.T) {
 				respond {http.request.body}
 			}
 
-			chrome
+			chrome {
+				links
+			}
 			root ./testdata
 			file_server
 		}`, "caddyfile")
