@@ -184,7 +184,7 @@ func (m *Middleware) ServeHTTP(w http.ResponseWriter, r *http.Request, next cadd
 						return
 					}
 
-					m.log.Debug("request fulfilled", zap.String("request_url", event.Request.URL))
+					m.log.Debug("request fulfilled", zap.String("request_url", event.Request.URL), zap.Int("status", res.Status()))
 				}()
 			case *runtime.EventExceptionThrown:
 				m.log.Error("exception thrown in runtime", zap.String("exception_details", event.ExceptionDetails.Exception.Description))
@@ -218,7 +218,8 @@ func (m *Middleware) ServeHTTP(w http.ResponseWriter, r *http.Request, next cadd
 	}))
 	err = chromedp.Run(browserCtx, tasks)
 	if err != nil {
-		return errors.Wrap(err, "failed to run chrome")
+		m.log.Info("failed to run chrome", zap.String("url", navigateURL), zap.Error(err))
+		return errors.Wrap(recorder.WriteResponse(), "failed to write original response")
 	}
 
 	headers := recorder.Header().Clone()

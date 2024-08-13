@@ -13,6 +13,9 @@ import (
 func TestMiddleware_ServeHTTP(t *testing.T) {
 	caddytest.Default.LoadRequestTimeout = 30 * time.Second
 	tester := caddytest.NewTester(t)
+	tester.Client.CheckRedirect = func(req *http.Request, via []*http.Request) error {
+		return http.ErrUseLastResponse
+	}
 	tester.InitServer(`
 		{
 			debug
@@ -29,6 +32,14 @@ func TestMiddleware_ServeHTTP(t *testing.T) {
 			handle @fetch_post {
 				respond {http.request.body}
 			}
+			handle /error.html {
+				try_files /error.html
+				header Location https://www.example.com/
+				file_server {
+					root ./testdata
+					status 302
+				}
+			}
 
 			chrome {
 				links
@@ -39,6 +50,7 @@ func TestMiddleware_ServeHTTP(t *testing.T) {
 
 	for _, testCase := range []struct {
 		url              string
+		statusCode       int
 		verifier         func(*testing.T, *http.Response, string)
 		configureRequest func(*http.Request) error
 	}{
@@ -219,6 +231,13 @@ func TestMiddleware_ServeHTTP(t *testing.T) {
 			},
 		},
 		{
+			url:        "http://localhost:9080/error.html",
+			statusCode: 302,
+			verifier: func(t *testing.T, res *http.Response, body string) {
+				assert.Contains(t, body, `<h1>This is a page with refresh</h1>`)
+			},
+		},
+		{
 			url: "http://localhost:9080/pending_task.html",
 			verifier: func(t *testing.T, res *http.Response, body string) {
 				assert.Contains(t, body, `<html>`)
@@ -226,6 +245,9 @@ func TestMiddleware_ServeHTTP(t *testing.T) {
 			},
 		},
 	} {
+		if testCase.statusCode == 0 {
+			testCase.statusCode = 200
+		}
 		t.Run(testCase.url, func(t *testing.T) {
 			req, err := http.NewRequest("GET", testCase.url, nil)
 			if err != nil {
@@ -236,7 +258,7 @@ func TestMiddleware_ServeHTTP(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			res := tester.AssertResponseCode(req, 200)
+			res := tester.AssertResponseCode(req, testCase.statusCode)
 			defer res.Body.Close()
 			bodyBytes, err := io.ReadAll(res.Body)
 			if err != nil {
