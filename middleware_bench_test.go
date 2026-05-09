@@ -33,10 +33,14 @@ func BenchmarkRender(b *testing.B) {
 		return http.ErrUseLastResponse
 	}
 	browserConfig := "exec"
-	browserLabel := "chrome"
+	browserLabel := "chrome_exec"
 	if u := os.Getenv("CADDY_CHROME_TEST_BROWSER_URL"); u != "" {
 		browserConfig = "url " + u
-		browserLabel = "lightpanda"
+		if l := os.Getenv("CADDY_CHROME_TEST_BROWSER_LABEL"); l != "" {
+			browserLabel = l
+		} else {
+			browserLabel = "remote"
+		}
 	}
 	tester.InitServer(fmt.Sprintf(`
 		{
@@ -44,6 +48,9 @@ func BenchmarkRender(b *testing.B) {
 			admin localhost:2999
 			http_port 9080
 			https_port 9443
+			log default {
+				output discard
+			}
 		}
 		http://localhost:9080 {
 			chrome {
@@ -116,10 +123,14 @@ func BenchmarkRenderParallel(b *testing.B) {
 		return http.ErrUseLastResponse
 	}
 	browserConfig := "exec"
-	browserLabel := "chrome"
+	browserLabel := "chrome_exec"
 	if u := os.Getenv("CADDY_CHROME_TEST_BROWSER_URL"); u != "" {
 		browserConfig = "url " + u
-		browserLabel = "lightpanda"
+		if l := os.Getenv("CADDY_CHROME_TEST_BROWSER_LABEL"); l != "" {
+			browserLabel = l
+		} else {
+			browserLabel = "remote"
+		}
 	}
 	tester.InitServer(fmt.Sprintf(`
 		{
@@ -127,6 +138,9 @@ func BenchmarkRenderParallel(b *testing.B) {
 			admin localhost:2999
 			http_port 9080
 			https_port 9443
+			log default {
+				output discard
+			}
 		}
 		http://localhost:9080 {
 			chrome {

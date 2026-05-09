@@ -125,24 +125,6 @@ func TestMiddleware_UnmarshalCaddyfile(t *testing.T) {
 			}`,
 			json: `{"links":true}`,
 		},
-		{
-			caddyfile: `chrome {
-				connection_per_request
-			}`,
-			json: `{"connection_per_request":true}`,
-		},
-		{
-			caddyfile: `chrome {
-				connection_per_request true
-			}`,
-			json: `{"connection_per_request":true}`,
-		},
-		{
-			caddyfile: `chrome {
-				connection_per_request false
-			}`,
-			json: `{"connection_per_request":false}`,
-		},
 	} {
 		t.Run(re.ReplaceAllString(testCase.caddyfile, " "), func(t *testing.T) {
 			m := new(Middleware)

@@ -87,34 +87,16 @@ func (m *Middleware) ServeHTTP(w http.ResponseWriter, r *http.Request, next cadd
 	}
 	navigateURL := scheme + "://" + r.Host + r.RequestURI
 
-	if m.singleTarget && !m.connPerRequest {
-		m.requestMu.Lock()
-		defer m.requestMu.Unlock()
-	}
-
-	var browserCtx context.Context
-	var browserCancel context.CancelFunc
-	if m.connPerRequest {
-		// Open a fresh WebSocket to the remote browser for this request.
-		// Lightpanda 0.2.4+ gives every CDP connection its own browser, so
-		// concurrent requests get full isolation without needing a mutex or
-		// WithNewBrowserContext.
-		timeoutCtx, timeoutCancel := context.WithTimeout(context.Background(), m.timeout)
-		defer timeoutCancel()
-		allocCtx, allocCancel := chromedp.NewRemoteAllocator(timeoutCtx, m.RemoteBrowser.URL)
-		defer allocCancel()
-		var bcancel context.CancelFunc
-		browserCtx, bcancel = chromedp.NewContext(allocCtx)
-		browserCancel = bcancel
-	} else {
-		timeoutCtx, timeoutCancel := context.WithTimeout(m.chromeCtx, m.timeout)
-		defer timeoutCancel()
-		var ctxOpts []chromedp.ContextOption
-		if !m.singleTarget {
-			ctxOpts = append(ctxOpts, chromedp.WithNewBrowserContext())
-		}
-		browserCtx, browserCancel = chromedp.NewContext(timeoutCtx, ctxOpts...)
-	}
+	// Always open a fresh WebSocket connection to the browser per request.
+	// For both Chrome (with chromedp default flags) and Lightpanda, this is
+	// faster than sharing one CDP connection because every render gets its
+	// own root browser session — no Target.createBrowserContext / disposal
+	// dance, no serialization on a single WS reader.
+	timeoutCtx, timeoutCancel := context.WithTimeout(context.Background(), m.timeout)
+	defer timeoutCancel()
+	allocCtx, allocCancel := chromedp.NewRemoteAllocator(timeoutCtx, m.browserURL)
+	defer allocCancel()
+	browserCtx, browserCancel := chromedp.NewContext(allocCtx)
 	defer browserCancel()
 
 	reqContext := r.Context()
@@ -127,7 +109,7 @@ func (m *Middleware) ServeHTTP(w http.ResponseWriter, r *http.Request, next cadd
 	links := newLinks()
 
 	var tasks chromedp.Tasks
-	if m.singleTarget {
+	if m.lightpanda {
 		// Lightpanda's CDP processes commands serially per session and dead-
 		// locks if we issue Fetch.fulfillRequest/continueRequest for sub-
 		// resources while the navigate fulfillment is still being parsed
@@ -143,7 +125,7 @@ func (m *Middleware) ServeHTTP(w http.ResponseWriter, r *http.Request, next cadd
 		tasks = append(tasks, fetch.Enable())
 	}
 	tasks = append(tasks, runtime.Enable())
-	if m.singleTarget {
+	if m.lightpanda {
 		tasks = append(tasks, chromedp.ActionFunc(func(ctx context.Context) error {
 			chromedp.ListenTarget(ctx, func(event any) {
 				switch event := event.(type) {
@@ -284,7 +266,7 @@ func (m *Middleware) ServeHTTP(w http.ResponseWriter, r *http.Request, next cadd
 	var serializer *domSerializer
 	var serializedHTML string
 	var finalURL string
-	if m.singleTarget {
+	if m.lightpanda {
 		// Browsers like Lightpanda support shadow DOM in JS but do not expose
 		// shadow roots through CDP DOM.getDocument. Serialize the document
 		// (including shadow roots as <template shadowrootmode>) in JS instead
@@ -308,7 +290,7 @@ func (m *Middleware) ServeHTTP(w http.ResponseWriter, r *http.Request, next cadd
 		m.log.Info("failed to run chrome", zap.String("url", navigateURL), zap.Error(err))
 		return errors.Wrap(recorder.WriteResponse(), "failed to write original response")
 	}
-	if m.singleTarget && finalURL != "" {
+	if m.lightpanda && finalURL != "" {
 		if loc, err := url.Parse(finalURL); err == nil && loc.Host != r.Host {
 			m.log.Info("page navigated cross-origin; serving original response",
 				zap.String("url", navigateURL), zap.String("final_url", finalURL))

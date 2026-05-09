@@ -36,24 +36,20 @@ Since Lightpanda 0.2.4 the limit is **per CDP WebSocket connection**, not per
 process — every connection gets its own full browser
 ([release notes](https://github.com/lightpanda-io/browser/releases/tag/v0.2.4)).
 
-**Fix.** A new `connection_per_request` Caddyfile option (auto-enabled when
-Lightpanda is detected, off for Chrome) makes `ServeHTTP` build a fresh
-`chromedp.NewRemoteAllocator` + `chromedp.NewContext` for every request, so
-each request gets its own WS connection and therefore its own browser.
-Concurrent requests no longer need a mutex and `WithNewBrowserContext` is
-unnecessary (the connection itself is the isolation boundary).
+**Fix.** Every render opens a fresh `chromedp.NewRemoteAllocator` +
+`chromedp.NewContext` — one new WS per request — so each request gets its own
+browser. Concurrent requests don't share state and no mutex is needed. The
+same code path is used for Chrome: it's also faster there because each render
+gets its own root browser session instead of paying for
+`Target.createBrowserContext` / disposal on a shared WS reader.
 
-`Provision` still uses a one-shot probe context for `Browser.getVersion` so it
-does not hold a target open between requests.
+For `exec` mode the middleware launches the browser once with
+`--remote-debugging-port=<picked>`, keeps a long-lived bootstrap WS open so
+chromedp's watchdog doesn't kill the process, and serves every render through
+its own fresh WS to the same browser.
 
-For Chrome, the original behaviour is preserved: the parent context is
-promoted to a `chromedp.Context`, and per-request children use
-`WithNewBrowserContext` for cookie/session isolation.
-
-If `connection_per_request false` is set explicitly on a Lightpanda backend,
-the old shared-connection path is used: a `sync.Mutex` (`Middleware.requestMu`)
-serializes `ServeHTTP` so at most one target exists at a time, and
-`WithNewBrowserContext` is skipped.
+`Provision` for `url` mode uses a one-shot WS to log the browser version, then
+discards it.
 
 ### 3. `Network.setCookie` rejects domains containing a port
 
@@ -181,20 +177,18 @@ workflow does this; the README documents it.
 ## Code map
 
 - **Auto-detection** —
-  [middleware.go](middleware.go) `detectSingleTargetBrowser`,
-  setting `m.singleTarget` when `/json/version` says
-  `"Browser":"Lightpanda/..."`.
-- **Single-target Provision** — [middleware.go](middleware.go) uses a one-shot
-  probe `chromedp.NewContext` and immediately cancels it; for Chrome it keeps
-  the original long-lived parent context. The `connection_per_request` option
-  is resolved here (default = `singleTarget`), with a guard that requires a
-  remote browser url.
+  [middleware.go](middleware.go) `detectLightpanda`, setting `m.lightpanda`
+  when `/json/version` says `"Browser":"Lightpanda/..."`.
+- **Provision** — [middleware.go](middleware.go): for `exec` mode picks a
+  free port, launches the browser via `chromedp.NewExecAllocator` with
+  `--remote-debugging-port=<picked>`, and keeps a single bootstrap WS open
+  for the lifetime of the middleware so chromedp's watchdog doesn't kill the
+  process. For `url` mode it stores the configured URL and runs a one-shot
+  remote probe to log the browser version.
 - **Per-request flow** — [middleware_serve_http.go](middleware_serve_http.go):
   - bypass-header short-circuit at the top of `ServeHTTP`,
-  - when `connection_per_request` is on: a fresh `chromedp.NewRemoteAllocator`
-    + `chromedp.NewContext` per request (no mutex, no `WithNewBrowserContext`);
-    otherwise the old path with `requestMu` for single-target backends,
-  - `WithNewBrowserContext` only in the shared-connection multi-target path,
+  - one fresh `chromedp.NewRemoteAllocator` + `chromedp.NewContext` per
+    request, regardless of backend,
   - separate listener bodies for `network.EventRequestWillBeSent`
     (single-target) vs. `fetch.EventRequestPaused` (multi-target),
   - cookie domain port strip,
