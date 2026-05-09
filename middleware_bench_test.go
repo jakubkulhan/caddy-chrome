@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"strconv"
 	"testing"
 	"time"
 )
@@ -33,14 +34,15 @@ func BenchmarkRender(b *testing.B) {
 		return http.ErrUseLastResponse
 	}
 	browserConfig := "exec"
-	browserLabel := "chrome_exec"
+	browserLabel := "default_exec"
+	if p := os.Getenv("CADDY_CHROME_TEST_EXEC_PATH"); p != "" {
+		browserConfig = "exec " + strconv.Quote(p)
+	}
 	if u := os.Getenv("CADDY_CHROME_TEST_BROWSER_URL"); u != "" {
 		browserConfig = "url " + u
-		if l := os.Getenv("CADDY_CHROME_TEST_BROWSER_LABEL"); l != "" {
-			browserLabel = l
-		} else {
-			browserLabel = "remote"
-		}
+	}
+	if l := os.Getenv("CADDY_CHROME_TEST_BROWSER_LABEL"); l != "" {
+		browserLabel = l
 	}
 	tester.InitServer(fmt.Sprintf(`
 		{
@@ -123,14 +125,15 @@ func BenchmarkRenderParallel(b *testing.B) {
 		return http.ErrUseLastResponse
 	}
 	browserConfig := "exec"
-	browserLabel := "chrome_exec"
+	browserLabel := "default_exec"
+	if p := os.Getenv("CADDY_CHROME_TEST_EXEC_PATH"); p != "" {
+		browserConfig = "exec " + strconv.Quote(p)
+	}
 	if u := os.Getenv("CADDY_CHROME_TEST_BROWSER_URL"); u != "" {
 		browserConfig = "url " + u
-		if l := os.Getenv("CADDY_CHROME_TEST_BROWSER_LABEL"); l != "" {
-			browserLabel = l
-		} else {
-			browserLabel = "remote"
-		}
+	}
+	if l := os.Getenv("CADDY_CHROME_TEST_BROWSER_LABEL"); l != "" {
+		browserLabel = l
 	}
 	tester.InitServer(fmt.Sprintf(`
 		{

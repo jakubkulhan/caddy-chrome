@@ -224,11 +224,14 @@ var chromeBinaries = []string{
 	"/Applications/Chromium.app/Contents/MacOS/Chromium",
 }
 
+// defaultChromeFlags mirrors chromedp.DefaultExecAllocatorOptions verbatim.
+// Keep in sync with that list — discrepancies showed up as a ~100x slowdown
+// in benchmarks because some of chromedp's flags (notably
+// --disable-features=site-per-process,...) materially change navigation cost.
 var defaultChromeFlags = []string{
-	"--headless",
-	"--disable-gpu",
 	"--no-first-run",
 	"--no-default-browser-check",
+	"--headless",
 	"--disable-background-networking",
 	"--enable-features=NetworkService,NetworkServiceInProcess",
 	"--disable-background-timer-throttling",
@@ -238,6 +241,7 @@ var defaultChromeFlags = []string{
 	"--disable-default-apps",
 	"--disable-dev-shm-usage",
 	"--disable-extensions",
+	"--disable-features=site-per-process,Translate,BlinkGenPropertyTrees",
 	"--disable-hang-monitor",
 	"--disable-ipc-flooding-protection",
 	"--disable-popup-blocking",
@@ -246,7 +250,6 @@ var defaultChromeFlags = []string{
 	"--disable-sync",
 	"--force-color-profile=srgb",
 	"--metrics-recording-only",
-	"--mute-audio",
 	"--safebrowsing-disable-auto-update",
 	"--enable-automation",
 	"--password-store=basic",
