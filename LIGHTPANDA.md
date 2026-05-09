@@ -121,25 +121,34 @@ It is also worth noting that Lightpanda does not honour `urlPattern`,
 than the default `*` silently no-ops, so we cannot ask Lightpanda to intercept
 "only the navigation" via patterns.
 
-**Fix.** In single-target mode, we **do not call `fetch.Enable` at all**.
-Instead:
+**Fix.** We **do not call `fetch.Enable` at all**. There are two routing paths,
+chosen by whether the middleware launched Lightpanda itself:
 
-- `Network.setExtraHTTPHeaders({"X-Caddy-Chrome-Bypass": "1"})` tags every
-  outgoing HTTP request from Lightpanda.
-- `Middleware.ServeHTTP` short-circuits on entry when it sees that header and
-  passes the request straight to `next.ServeHTTP`. Lightpanda fetches both the
-  navigation and every sub-resource (XHR, `fetch()`, `<script>`) directly from
-  the same Caddy server; the chrome middleware is bypassed for those internal
-  hits, so the rest of the Caddyfile (file_server, upstream proxy, etc.)
-  serves them normally without re-rendering.
-- A listener subscribes to `Network.requestWillBeSent` to keep populating
-  preload `Link` headers for the resource types Lightpanda actually loads.
+- **`exec` mode (preferred): HTTP proxy.** The middleware starts a small HTTP
+  proxy ([proxy.go](proxy.go)) on a free port and launches Lightpanda with
+  `--http-proxy http://127.0.0.1:<port>`. Per-request, it registers a
+  `renderEntry` keyed by a random ID and tags every outgoing browser request
+  with `X-Caddy-Chrome-Render: <id>` via `Network.setExtraHTTPHeaders`. The
+  proxy uses that ID to look up the in-flight render and:
+    - serves the navigation directly from the buffered upstream response —
+      **no second upstream hit**;
+    - routes same-origin sub-resources through `caddyhttp.Server.ServeHTTP`,
+      with the bypass header set on the synthetic sub-request to short-circuit
+      this middleware and avoid recursion;
+    - relays cross-origin requests outbound via `http.DefaultTransport`;
+    - tunnels HTTPS via `CONNECT` (no MITM — for HTTPS sub-resources this is
+      effectively the same as the bypass-header path).
 
-Trade-off: the upstream is now hit once for the original client request (to
-detect whether the response is HTML and warrant rendering, via the buffered
-`caddyhttp.NewResponseRecorder`) **and** a second time when Lightpanda fetches
-the URL. For static content this is fine; for expensive dynamic upstreams it
-doubles the cost.
+- **`url` mode (external Lightpanda): bypass header.** We can't add
+  `--http-proxy` to a process we didn't launch, so we fall back to the older
+  approach: `Network.setExtraHTTPHeaders({"X-Caddy-Chrome-Bypass": "1"})` tags
+  every outgoing request, and `Middleware.ServeHTTP` short-circuits when it
+  sees that header. Lightpanda fetches the navigation and sub-resources
+  directly from the same Caddy server; this hits the upstream a second time.
+
+`Middleware.ServeHTTP` short-circuits on either header (`bypassHeader` or
+`renderHeader`) so HTTPS sub-resources tunneled via the proxy's CONNECT also
+don't re-enter rendering.
 
 ### 6. Lightpanda follows redirects we used to block
 

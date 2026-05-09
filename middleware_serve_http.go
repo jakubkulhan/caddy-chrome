@@ -46,7 +46,7 @@ var skipHeaders = map[string]struct{}{
 const bypassHeader = "X-Caddy-Chrome-Bypass"
 
 func (m *Middleware) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddyhttp.Handler) error {
-	if r.Header.Get(bypassHeader) != "" {
+	if r.Header.Get(bypassHeader) != "" || r.Header.Get(renderHeader) != "" {
 		return next.ServeHTTP(w, r)
 	}
 	buf := bufPool.Get().(*bytes.Buffer)
@@ -114,13 +114,30 @@ func (m *Middleware) ServeHTTP(w http.ResponseWriter, r *http.Request, next cadd
 		// locks if we issue Fetch.fulfillRequest/continueRequest for sub-
 		// resources while the navigate fulfillment is still being parsed
 		// (e.g. a <script type=module> with an inline `import`). Skip Fetch
-		// interception entirely; instead, ask the browser to tag every
-		// outgoing request with a marker header so this middleware can pass
-		// the request straight through to the next handler — Lightpanda will
-		// fetch the navigation and every sub-resource directly from the same
-		// Caddy server.
+		// interception entirely.
 		tasks = append(tasks, network.Enable())
-		tasks = append(tasks, network.SetExtraHTTPHeaders(network.Headers{bypassHeader: "1"}))
+		if m.proxy != nil {
+			// We launched lightpanda ourselves with --http-proxy pointing at
+			// our renderProxy. Tag every outgoing request with the render ID
+			// so the proxy knows which in-flight render to route through.
+			id := m.proxy.register(&renderEntry{
+				navigateURL: navigateURL,
+				originHost:  r.Host,
+				server:      server,
+				recorder:    recorder,
+				links:       links,
+				reqContext:  reqContext,
+				log:         m.log,
+			})
+			defer m.proxy.unregister(id)
+			tasks = append(tasks, network.SetExtraHTTPHeaders(network.Headers{renderHeader: id}))
+		} else {
+			// External lightpanda (url mode): no proxy. Tag every request
+			// with the bypass marker so this middleware short-circuits when
+			// Lightpanda fetches the navigation / sub-resources directly
+			// from the same Caddy server.
+			tasks = append(tasks, network.SetExtraHTTPHeaders(network.Headers{bypassHeader: "1"}))
+		}
 	} else {
 		tasks = append(tasks, fetch.Enable())
 	}

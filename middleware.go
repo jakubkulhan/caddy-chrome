@@ -47,6 +47,11 @@ type Middleware struct {
 	tempDir    string
 	browserURL string
 	lightpanda bool
+	// proxy is started only when the middleware launched lightpanda itself
+	// (exec mode). Lightpanda is told to use it via --http-proxy and the
+	// per-request flow registers a render entry so the proxy can route
+	// requests through the same Caddy server (or out to the network).
+	proxy *renderProxy
 }
 
 type ExecBrowser struct {
@@ -110,7 +115,12 @@ func (m *Middleware) Provision(ctx caddy.Context) (err error) {
 		var args []string
 		switch kind {
 		case browserLightpanda:
+			m.proxy, perr = newRenderProxy(m.log)
+			if perr != nil {
+				return fmt.Errorf("start render proxy: %w", perr)
+			}
 			args = append(args, "serve", "--host", "127.0.0.1", "--port", strconv.Itoa(port))
+			args = append(args, "--http-proxy", m.proxy.addr)
 			args = append(args, m.ExecBrowser.Flags...)
 		case browserChrome:
 			if m.ExecBrowser.DefaultFlags {
@@ -344,6 +354,10 @@ func (m *Middleware) cleanup() {
 	if m.tempDir != "" {
 		_ = os.RemoveAll(m.tempDir)
 		m.tempDir = ""
+	}
+	if m.proxy != nil {
+		_ = m.proxy.close()
+		m.proxy = nil
 	}
 }
 
