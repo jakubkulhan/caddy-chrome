@@ -131,7 +131,9 @@ func (p *renderProxy) serve(w http.ResponseWriter, r *http.Request) {
 	entry, ok := p.renders[id]
 	p.mu.RUnlock()
 	if !ok {
-		p.log.Warn("proxied request without a registered render", zap.String("url", r.URL.String()))
+		// Chrome fires background requests (account check, omnibox, autofill)
+		// that aren't tied to any render — expected, debug-level only.
+		p.log.Debug("proxied request without a registered render", zap.String("url", r.URL.String()))
 		http.Error(w, "unknown render", http.StatusBadGateway)
 		return
 	}
@@ -187,7 +189,7 @@ func (p *renderProxy) handleConnect(w http.ResponseWriter, r *http.Request) {
 			entry, ok := p.renders[id]
 			p.mu.RUnlock()
 			if !ok {
-				p.log.Warn("MITM request without a registered render",
+				p.log.Debug("MITM request without a registered render",
 					zap.String("url", req.URL.String()))
 				http.Error(w, "unknown render", http.StatusBadGateway)
 				return
