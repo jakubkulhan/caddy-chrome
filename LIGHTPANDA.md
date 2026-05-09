@@ -136,8 +136,13 @@ chosen by whether the middleware launched Lightpanda itself:
       with the bypass header set on the synthetic sub-request to short-circuit
       this middleware and avoid recursion;
     - relays cross-origin requests outbound via `http.DefaultTransport`;
-    - tunnels HTTPS via `CONNECT` (no MITM — for HTTPS sub-resources this is
-      effectively the same as the bypass-header path).
+    - **MITMs HTTPS** on `CONNECT`: a per-process self-signed CA mints a
+      leaf cert for the requested host; after the TLS handshake (driven by
+      a single-conn `http.Server`) the decrypted request goes through the
+      same routing logic as plain HTTP, so HTTPS navigations and
+      sub-resources also benefit from buffered-response fulfillment and
+      same-origin internal routing. Lightpanda accepts our self-signed
+      chain when launched with `--insecure-disable-tls-host-verification`.
 
 - **`url` mode (external Lightpanda): bypass header.** We can't add
   `--http-proxy` to a process we didn't launch, so we fall back to the older

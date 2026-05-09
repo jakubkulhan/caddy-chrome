@@ -3,15 +3,21 @@ package caddy_chrome
 import (
 	"context"
 	"crypto/rand"
+	"crypto/rsa"
+	"crypto/tls"
+	"crypto/x509"
+	"crypto/x509/pkix"
 	"encoding/hex"
 	"errors"
 	"github.com/chromedp/cdproto/network"
 	"go.uber.org/zap"
 	"io"
+	"math/big"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"sync"
+	"time"
 )
 
 // renderHeader carries a short opaque ID identifying which in-flight render
@@ -33,6 +39,10 @@ type renderProxy struct {
 	log      *zap.Logger
 	mu       sync.RWMutex
 	renders  map[string]*renderEntry
+
+	ca       *tls.Certificate
+	leafMu   sync.Mutex
+	leaves   map[string]*tls.Certificate
 }
 
 type renderEntry struct {
@@ -46,6 +56,10 @@ type renderEntry struct {
 }
 
 func newRenderProxy(log *zap.Logger) (*renderProxy, error) {
+	ca, err := generateMITMCA()
+	if err != nil {
+		return nil, err
+	}
 	l, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		return nil, err
@@ -55,6 +69,8 @@ func newRenderProxy(log *zap.Logger) (*renderProxy, error) {
 		listener: l,
 		log:      log,
 		renders:  map[string]*renderEntry{},
+		ca:       ca,
+		leaves:   map[string]*tls.Certificate{},
 	}
 	p.server = &http.Server{Handler: http.HandlerFunc(p.serve)}
 	go func() {
@@ -103,38 +119,167 @@ func (p *renderProxy) serve(w http.ResponseWriter, r *http.Request) {
 	p.handleHTTP(w, r, entry)
 }
 
+// handleConnect MITMs the TLS tunnel: it accepts the CONNECT, mints a leaf
+// cert for the target host signed by our in-memory CA, performs the TLS
+// handshake with the browser, and then hands the decrypted connection off to
+// an http.Server using the same routing logic as plain HTTP. Lightpanda
+// accepts our self-signed chain when launched with
+// --insecure-disable-tls-host-verification.
 func (p *renderProxy) handleConnect(w http.ResponseWriter, r *http.Request) {
-	target, err := net.Dial("tcp", r.Host)
+	host, _, err := net.SplitHostPort(r.Host)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusBadGateway)
+		host = r.Host
+	}
+	leaf, err := p.leafFor(host)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
 	hj, ok := w.(http.Hijacker)
 	if !ok {
-		target.Close()
 		http.Error(w, "hijack unsupported", http.StatusInternalServerError)
 		return
 	}
 	client, _, err := hj.Hijack()
 	if err != nil {
-		target.Close()
 		return
 	}
 	if _, err := client.Write([]byte("HTTP/1.1 200 OK\r\n\r\n")); err != nil {
 		client.Close()
-		target.Close()
 		return
 	}
-	go func() {
-		defer target.Close()
-		defer client.Close()
-		_, _ = io.Copy(target, client)
-	}()
-	go func() {
-		defer client.Close()
-		defer target.Close()
-		_, _ = io.Copy(client, target)
-	}()
+
+	tlsConn := tls.Server(client, &tls.Config{Certificates: []tls.Certificate{*leaf}})
+	if err := tlsConn.Handshake(); err != nil {
+		p.log.Debug("MITM handshake failed", zap.String("host", host), zap.Error(err))
+		tlsConn.Close()
+		return
+	}
+
+	authority := r.Host
+	ln := &singleConnListener{conn: tlsConn, done: make(chan struct{})}
+	inner := &http.Server{
+		ErrorLog: nil,
+		Handler: http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+			req.URL.Scheme = "https"
+			req.URL.Host = authority
+			id := req.Header.Get(renderHeader)
+			p.mu.RLock()
+			entry, ok := p.renders[id]
+			p.mu.RUnlock()
+			if !ok {
+				p.log.Warn("MITM request without a registered render",
+					zap.String("url", req.URL.String()))
+				http.Error(w, "unknown render", http.StatusBadGateway)
+				return
+			}
+			p.handleHTTP(w, req, entry)
+		}),
+	}
+	_ = inner.Serve(ln)
+}
+
+// singleConnListener feeds a single pre-existing net.Conn into http.Server.
+// After handing the conn over, Accept blocks until Close — at which point
+// http.Server returns from Serve.
+type singleConnListener struct {
+	conn net.Conn
+	once sync.Once
+	used bool
+	mu   sync.Mutex
+	done chan struct{}
+}
+
+func (l *singleConnListener) Accept() (net.Conn, error) {
+	l.mu.Lock()
+	if !l.used {
+		l.used = true
+		l.mu.Unlock()
+		return l.conn, nil
+	}
+	l.mu.Unlock()
+	<-l.done
+	return nil, io.EOF
+}
+
+func (l *singleConnListener) Close() error {
+	l.once.Do(func() { close(l.done) })
+	return l.conn.Close()
+}
+
+func (l *singleConnListener) Addr() net.Addr { return l.conn.LocalAddr() }
+
+func generateMITMCA() (*tls.Certificate, error) {
+	priv, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		return nil, err
+	}
+	serial, err := rand.Int(rand.Reader, new(big.Int).Lsh(big.NewInt(1), 62))
+	if err != nil {
+		return nil, err
+	}
+	tmpl := &x509.Certificate{
+		SerialNumber:          serial,
+		Subject:               pkix.Name{CommonName: "caddy-chrome MITM"},
+		NotBefore:             time.Now().Add(-time.Hour),
+		NotAfter:              time.Now().Add(10 * 365 * 24 * time.Hour),
+		KeyUsage:              x509.KeyUsageCertSign | x509.KeyUsageDigitalSignature,
+		BasicConstraintsValid: true,
+		IsCA:                  true,
+	}
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &priv.PublicKey, priv)
+	if err != nil {
+		return nil, err
+	}
+	leaf, err := x509.ParseCertificate(der)
+	if err != nil {
+		return nil, err
+	}
+	return &tls.Certificate{Certificate: [][]byte{der}, PrivateKey: priv, Leaf: leaf}, nil
+}
+
+func (p *renderProxy) leafFor(host string) (*tls.Certificate, error) {
+	p.leafMu.Lock()
+	defer p.leafMu.Unlock()
+	if c, ok := p.leaves[host]; ok {
+		return c, nil
+	}
+	priv, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		return nil, err
+	}
+	serial, err := rand.Int(rand.Reader, new(big.Int).Lsh(big.NewInt(1), 62))
+	if err != nil {
+		return nil, err
+	}
+	tmpl := &x509.Certificate{
+		SerialNumber: serial,
+		Subject:      pkix.Name{CommonName: host},
+		NotBefore:    time.Now().Add(-time.Hour),
+		NotAfter:     time.Now().Add(365 * 24 * time.Hour),
+		KeyUsage:     x509.KeyUsageDigitalSignature | x509.KeyUsageKeyEncipherment,
+		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+	}
+	if ip := net.ParseIP(host); ip != nil {
+		tmpl.IPAddresses = []net.IP{ip}
+	} else {
+		tmpl.DNSNames = []string{host}
+	}
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, p.ca.Leaf, &priv.PublicKey, p.ca.PrivateKey)
+	if err != nil {
+		return nil, err
+	}
+	leaf, err := x509.ParseCertificate(der)
+	if err != nil {
+		return nil, err
+	}
+	cert := &tls.Certificate{
+		Certificate: [][]byte{der, p.ca.Leaf.Raw},
+		PrivateKey:  priv,
+		Leaf:        leaf,
+	}
+	p.leaves[host] = cert
+	return cert, nil
 }
 
 func (p *renderProxy) handleHTTP(w http.ResponseWriter, r *http.Request, entry *renderEntry) {
