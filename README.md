@@ -49,6 +49,8 @@ chrome {
     
     fullfill_hosts localhost app.example.com api.example.com
     continue_hosts cdn.example.com static.example.com
+
+    connection_per_request
 }
 ```
 
@@ -60,6 +62,18 @@ chrome {
   - `url` - URL to the debugging protocol endpoint of a remote browser instance
 - `fullfill_hosts` - a list of hosts to issue as internal requests through the webserver, there's automatically the host of the original request
 - `continue_hosts` - a list of hosts to let Chrome do the regular network requests
+- `connection_per_request` - open a fresh CDP WebSocket to the remote browser for each rendered request (only valid with `url`). Optional `true` / `false` argument; if omitted defaults to `true`. If the directive itself is omitted the value is auto-detected: enabled for Lightpanda, disabled for Chrome. Lightpanda 0.2.4+ gives every CDP connection its own browser, so this lifts the single-target serialization that was needed before.
+
+## Browsers
+
+In addition to headless Chrome, [Lightpanda](https://lightpanda.io/) is supported as a CDP-compatible backend. Start it as `lightpanda serve --host 127.0.0.1 --port 9222` and point caddy-chrome at it via `url http://127.0.0.1:9222/`. Lightpanda is detected automatically (via `/json/version`) and the middleware switches to a single-target rendering mode:
+
+- by default a fresh CDP WebSocket connection is opened per request (`connection_per_request`, see [Configuration](#configuration)) — Lightpanda 0.2.4+ gives every connection its own full browser, so concurrent requests get full isolation. Set `connection_per_request false` to fall back to the older shared-connection mode where requests are serialized through one browser target;
+- `Fetch` interception is skipped — Lightpanda's CDP processes commands serially per session, and dispatching `Fetch.fulfillRequest`/`continueRequest` for a sub-resource while the navigation fulfillment is being parsed deadlocks the WS read loop (see [lightpanda-io/browser#2391](https://github.com/lightpanda-io/browser/issues/2391)). Instead, caddy-chrome sets a `X-Caddy-Chrome-Bypass` header via `Network.setExtraHTTPHeaders` and lets Lightpanda fetch the navigation and every sub-resource (XHR, `fetch()`, `<script>`) directly from the same Caddy server. The middleware sees the marker header and passes the request straight to the next handler;
+- if Lightpanda follows a cross-origin redirect, caddy-chrome detects it via `location.href` and falls back to the original upstream response;
+- shadow roots are not exposed through Lightpanda's CDP `DOM.getDocument`, so a JS-side serializer walks the live DOM (including each `el.shadowRoot` and any unparsed `<template shadowrootmode>` elements) and returns the HTML directly, without mutating the document.
+
+Lightpanda is a headless browser without a rendering pipeline, so it does not fetch stylesheets, images or fonts at all — those are not visible to the middleware and no preload `Link` headers are emitted for them. If your Caddy site serves HTTPS to localhost (e.g. for tests), pass `--insecure-disable-tls-host-verification` when starting `lightpanda serve`.
 
 ## Build
 

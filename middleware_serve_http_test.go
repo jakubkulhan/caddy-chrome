@@ -1,10 +1,12 @@
 package caddy_chrome
 
 import (
+	"fmt"
 	"github.com/alecthomas/assert/v2"
 	"github.com/caddyserver/caddy/v2/caddytest"
 	"io"
 	"net/http"
+	"os"
 	"slices"
 	"testing"
 	"time"
@@ -16,7 +18,11 @@ func TestMiddleware_ServeHTTP(t *testing.T) {
 	tester.Client.CheckRedirect = func(req *http.Request, via []*http.Request) error {
 		return http.ErrUseLastResponse
 	}
-	tester.InitServer(`
+	browserConfig := "exec"
+	if u := os.Getenv("CADDY_CHROME_TEST_BROWSER_URL"); u != "" {
+		browserConfig = "url " + u
+	}
+	tester.InitServer(fmt.Sprintf(`
 		{
 			debug
 			skip_install_trust
@@ -42,17 +48,20 @@ func TestMiddleware_ServeHTTP(t *testing.T) {
 			}
 
 			chrome {
+				%s
 				links
 			}
 			root ./testdata
 			file_server
-		}`, "caddyfile")
+		}`, browserConfig), "caddyfile")
 
+	isLightpanda := os.Getenv("CADDY_CHROME_TEST_BROWSER_URL") != ""
 	for _, testCase := range []struct {
 		url              string
 		statusCode       int
 		verifier         func(*testing.T, *http.Response, string)
 		configureRequest func(*http.Request) error
+		skipLightpanda   string
 	}{
 		{
 			url: "http://localhost:9080/html.html",
@@ -156,7 +165,8 @@ func TestMiddleware_ServeHTTP(t *testing.T) {
 			},
 		},
 		{
-			url: "http://localhost:9080/links.html",
+			url:            "http://localhost:9080/links.html",
+			skipLightpanda: "Lightpanda does not fetch stylesheet/image/font resources",
 			verifier: func(t *testing.T, res *http.Response, body string) {
 				linkHeaders := res.Header.Values("Link")
 				slices.Sort(linkHeaders)
@@ -249,6 +259,9 @@ func TestMiddleware_ServeHTTP(t *testing.T) {
 			testCase.statusCode = 200
 		}
 		t.Run(testCase.url, func(t *testing.T) {
+			if isLightpanda && testCase.skipLightpanda != "" {
+				t.Skip("skipped on Lightpanda: " + testCase.skipLightpanda)
+			}
 			req, err := http.NewRequest("GET", testCase.url, nil)
 			if err != nil {
 				t.Fatal(err)

@@ -1,7 +1,7 @@
 on: [push]
 
 jobs:
-  test:
+  test-chrome:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -10,3 +10,37 @@ jobs:
           go-version: 1.22.5
       - run: go get .
       - run: go test -v ./...
+
+  test-lightpanda:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: 1.22.5
+      - name: Install Lightpanda
+        run: |
+          curl -sSL -o /usr/local/bin/lightpanda https://github.com/lightpanda-io/browser/releases/latest/download/lightpanda-x86_64-linux
+          chmod +x /usr/local/bin/lightpanda
+          lightpanda version
+      - name: Start Lightpanda
+        run: |
+          # --insecure-disable-tls-host-verification lets Lightpanda fetch
+          # the test server's self-signed HTTPS endpoint.
+          nohup lightpanda serve --host 127.0.0.1 --port 9223 --insecure-disable-tls-host-verification > lightpanda.log 2>&1 &
+          for i in $(seq 1 30); do
+            if curl -sf http://127.0.0.1:9223/json/version > /dev/null; then
+              echo "Lightpanda is up"
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "Lightpanda failed to start"
+          cat lightpanda.log
+          exit 1
+      - run: go get .
+      - env:
+          CADDY_CHROME_TEST_BROWSER_URL: http://127.0.0.1:9223/
+        run: go test -v ./...
+      - if: failure()
+        run: cat lightpanda.log

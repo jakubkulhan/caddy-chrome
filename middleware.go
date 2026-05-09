@@ -2,15 +2,19 @@ package caddy_chrome
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"github.com/caddyserver/caddy/v2"
 	"github.com/caddyserver/caddy/v2/caddyconfig/caddyfile"
 	"github.com/caddyserver/caddy/v2/caddyconfig/httpcaddyfile"
 	"github.com/caddyserver/caddy/v2/modules/caddyhttp"
 	"github.com/chromedp/cdproto/browser"
+	"github.com/chromedp/cdproto/cdp"
 	"github.com/chromedp/chromedp"
 	"go.uber.org/zap"
+	"net/http"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -21,16 +25,20 @@ func init() {
 }
 
 type Middleware struct {
-	Timeout       string         `json:"timeout,omitempty"`
-	MIMETypes     []string       `json:"mime_types,omitempty"`
-	ExecBrowser   *ExecBrowser   `json:"exec_browser,omitempty"`
-	RemoteBrowser *RemoteBrowser `json:"remote_browser,omitempty"`
-	FulfillHosts  []string       `json:"fulfill_hosts,omitempty"`
-	ContinueHosts []string       `json:"continue_hosts,omitempty"`
-	Links         bool           `json:"links,omitempty"`
-	log           *zap.Logger
-	timeout       time.Duration
-	chromeCtx     context.Context
+	Timeout              string         `json:"timeout,omitempty"`
+	MIMETypes            []string       `json:"mime_types,omitempty"`
+	ExecBrowser          *ExecBrowser   `json:"exec_browser,omitempty"`
+	RemoteBrowser        *RemoteBrowser `json:"remote_browser,omitempty"`
+	FulfillHosts         []string       `json:"fulfill_hosts,omitempty"`
+	ContinueHosts        []string       `json:"continue_hosts,omitempty"`
+	Links                bool           `json:"links,omitempty"`
+	ConnectionPerRequest *bool          `json:"connection_per_request,omitempty"`
+	log                  *zap.Logger
+	timeout              time.Duration
+	chromeCtx            context.Context
+	singleTarget         bool
+	connPerRequest       bool
+	requestMu            sync.Mutex
 }
 
 type ExecBrowser struct {
@@ -89,20 +97,48 @@ func (m *Middleware) Provision(ctx caddy.Context) (err error) {
 		m.chromeCtx, cancel = chromedp.NewExecAllocator(context.Background(), opts...)
 
 	} else if m.RemoteBrowser != nil {
+		m.singleTarget = detectSingleTargetBrowser(m.RemoteBrowser.URL)
 		m.chromeCtx, cancel = chromedp.NewRemoteAllocator(context.Background(), m.RemoteBrowser.URL)
 
 	} else {
 		panic("unreachable")
 	}
-	m.chromeCtx, _ = chromedp.NewContext(m.chromeCtx)
+
+	if m.ConnectionPerRequest != nil {
+		m.connPerRequest = *m.ConnectionPerRequest
+	} else {
+		m.connPerRequest = m.singleTarget
+	}
+	if m.connPerRequest && m.RemoteBrowser == nil {
+		return fmt.Errorf("connection_per_request requires a remote browser url")
+	}
 	defer func() {
 		if err != nil {
 			cancel()
 			m.chromeCtx = nil
 		}
 	}()
-	err = chromedp.Run(m.chromeCtx, chromedp.ActionFunc(func(ctx context.Context) error {
-		protocolVersion, product, revision, userAgent, jsVersion, err := browser.GetVersion().Do(ctx)
+
+	// In single-target mode (e.g. Lightpanda) the browser allows only one open
+	// target at a time, so we cannot keep a long-lived parent context with its
+	// own target alive across requests. Use a one-shot probe instead.
+	// In multi-target mode we promote m.chromeCtx to a chromedp.Context so that
+	// per-request child contexts can use WithNewBrowserContext for isolation.
+	probeCtx := m.chromeCtx
+	var probeCancel context.CancelFunc
+	if m.singleTarget {
+		probeCtx, probeCancel = chromedp.NewContext(m.chromeCtx)
+	} else {
+		m.chromeCtx, _ = chromedp.NewContext(m.chromeCtx)
+		probeCtx = m.chromeCtx
+	}
+	// Browser.getVersion must be issued against the browser session (not a page
+	// session) because some CDP implementations (e.g. Lightpanda) only respond
+	// to Browser-level commands when they are sent without a sessionId.
+	err = chromedp.Run(probeCtx, chromedp.ActionFunc(func(ctx context.Context) error {
+		c := chromedp.FromContext(ctx)
+		bctx := cdp.WithExecutor(ctx, c.Browser)
+		protocolVersion, product, revision, userAgent, jsVersion, err := browser.GetVersion().Do(bctx)
 		if err != nil {
 			return err
 		}
@@ -111,14 +147,44 @@ func (m *Middleware) Provision(ctx caddy.Context) (err error) {
 			zap.String("product", product),
 			zap.String("revision", revision),
 			zap.String("user_agent", userAgent),
-			zap.String("js_version", jsVersion))
+			zap.String("js_version", jsVersion),
+			zap.Bool("single_target", m.singleTarget),
+			zap.Bool("connection_per_request", m.connPerRequest))
 		return nil
 	}))
+	if probeCancel != nil {
+		probeCancel()
+	}
 	if err != nil {
 		return
 	}
 
 	return nil
+}
+
+// detectSingleTargetBrowser probes the remote debugging endpoint to identify
+// browsers (currently Lightpanda) that only support a single target / browser
+// context at a time and require serialized request handling.
+func detectSingleTargetBrowser(remoteURL string) bool {
+	u := strings.TrimSuffix(remoteURL, "/") + "/json/version"
+	if strings.HasPrefix(u, "ws://") {
+		u = "http://" + strings.TrimPrefix(u, "ws://")
+	} else if strings.HasPrefix(u, "wss://") {
+		u = "https://" + strings.TrimPrefix(u, "wss://")
+	}
+	client := &http.Client{Timeout: 5 * time.Second}
+	resp, err := client.Get(u)
+	if err != nil {
+		return false
+	}
+	defer resp.Body.Close()
+	var info struct {
+		Browser string `json:"Browser"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&info); err != nil {
+		return false
+	}
+	return strings.HasPrefix(info.Browser, "Lightpanda")
 }
 
 func (m *Middleware) Cleanup() error {
@@ -193,6 +259,25 @@ func (m *Middleware) UnmarshalCaddyfile(d *caddyfile.Dispenser) error {
 				if d.CountRemainingArgs() != 0 {
 					return d.ArgErr()
 				}
+			case "connection_per_request":
+				args := d.RemainingArgs()
+				var v bool
+				switch len(args) {
+				case 0:
+					v = true
+				case 1:
+					switch args[0] {
+					case "true", "yes", "on":
+						v = true
+					case "false", "no", "off":
+						v = false
+					default:
+						return d.ArgErr()
+					}
+				default:
+					return d.ArgErr()
+				}
+				m.ConnectionPerRequest = &v
 			default:
 				return d.ArgErr()
 			}
