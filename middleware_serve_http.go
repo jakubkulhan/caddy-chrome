@@ -3,11 +3,9 @@ package caddy_chrome
 import (
 	"bytes"
 	"context"
-	"encoding/base64"
 	"github.com/caddyserver/caddy/v2/modules/caddyhttp"
 	"github.com/chromedp/cdproto/dom"
 	"github.com/chromedp/cdproto/emulation"
-	"github.com/chromedp/cdproto/fetch"
 	"github.com/chromedp/cdproto/network"
 	"github.com/chromedp/cdproto/page"
 	"github.com/chromedp/cdproto/runtime"
@@ -16,11 +14,9 @@ import (
 	"go.uber.org/zap"
 	"io"
 	"mime"
+	"net"
 	"net/http"
-	"net/http/httptest"
 	"net/url"
-	"slices"
-	"strings"
 	"sync"
 )
 
@@ -38,7 +34,16 @@ var skipHeaders = map[string]struct{}{
 	"Vary":           {},
 }
 
+// bypassHeader is set on every sub-request the browser makes to the same
+// Caddy server while we are rendering. When this middleware sees the marker
+// it passes the request through to the next handler so the browser observes
+// the unmodified upstream response (no recursive rendering, no recorder).
+const bypassHeader = "X-Caddy-Chrome-Bypass"
+
 func (m *Middleware) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddyhttp.Handler) error {
+	if r.Header.Get(bypassHeader) != "" || r.Header.Get(renderHeader) != "" {
+		return next.ServeHTTP(w, r)
+	}
 	buf := bufPool.Get().(*bytes.Buffer)
 	buf.Reset()
 	defer bufPool.Put(buf)
@@ -77,10 +82,16 @@ func (m *Middleware) ServeHTTP(w http.ResponseWriter, r *http.Request, next cadd
 	}
 	navigateURL := scheme + "://" + r.Host + r.RequestURI
 
-	timeoutCtx, timeoutCancel := context.WithTimeout(m.chromeCtx, m.timeout)
+	// Always open a fresh WebSocket connection to the browser per request.
+	// For both Chrome (with chromedp default flags) and Lightpanda, this is
+	// faster than sharing one CDP connection because every render gets its
+	// own root browser session — no Target.createBrowserContext / disposal
+	// dance, no serialization on a single WS reader.
+	timeoutCtx, timeoutCancel := context.WithTimeout(context.Background(), m.timeout)
 	defer timeoutCancel()
-
-	browserCtx, browserCancel := chromedp.NewContext(timeoutCtx, chromedp.WithNewBrowserContext())
+	allocCtx, allocCancel := chromedp.NewRemoteAllocator(timeoutCtx, m.browserURL)
+	defer allocCancel()
+	browserCtx, browserCancel := chromedp.NewContext(allocCtx)
 	defer browserCancel()
 
 	reqContext := r.Context()
@@ -92,108 +103,58 @@ func (m *Middleware) ServeHTTP(w http.ResponseWriter, r *http.Request, next cadd
 
 	links := newLinks()
 
+	// All browser traffic is intercepted by the in-process render proxy
+	// (exec mode) or routed back through Caddy via the bypass header
+	// (url mode). Either way, no CDP Fetch interception is involved.
 	var tasks chromedp.Tasks
-	tasks = append(tasks, fetch.Enable())
+	tasks = append(tasks, network.Enable())
+	if m.proxy != nil {
+		id := m.proxy.register(&renderEntry{
+			navigateURL:   navigateURL,
+			originHost:    r.Host,
+			fulfillHosts:  m.FulfillHosts,
+			continueHosts: m.ContinueHosts,
+			server:        server,
+			recorder:      recorder,
+			links:         links,
+			reqContext:    reqContext,
+			log:           m.log,
+		})
+		defer m.proxy.unregister(id)
+		tasks = append(tasks, network.SetExtraHTTPHeaders(network.Headers{renderHeader: id}))
+	} else {
+		// External browser (url mode): no proxy. Tag every request with
+		// the bypass marker so this middleware short-circuits when the
+		// browser fetches the navigation / sub-resources directly from
+		// the same Caddy server.
+		tasks = append(tasks, network.SetExtraHTTPHeaders(network.Headers{bypassHeader: "1"}))
+	}
 	tasks = append(tasks, runtime.Enable())
 	tasks = append(tasks, chromedp.ActionFunc(func(ctx context.Context) error {
 		chromedp.ListenTarget(ctx, func(event any) {
 			switch event := event.(type) {
-			case *fetch.EventRequestPaused:
-				go func() {
-					var res response
-					pausedURL, err := url.Parse(event.Request.URL)
-					m.log.Debug("request paused",
-						zap.String("request_url", event.Request.URL),
-						zap.Bool("is_navigate", event.Request.URL == navigateURL),
-						zap.Bool("has_post_data", event.Request.HasPostData))
-
-					if err != nil {
-						m.log.Error("failed to parse request URL", zap.String("request_url", event.Request.URL), zap.Error(err))
-						browserCancel()
-						return
-					}
-
-					if event.Request.URL == navigateURL {
-						res = recorder
-
-					} else if shouldHandleResourceType(event.ResourceType) && (pausedURL.Host == r.Host || slices.Contains(m.FulfillHosts, pausedURL.Host)) {
-						if pausedURL.Host == r.Host {
-							links.AddResource(event.Request.URL, event.ResourceType)
-						} else {
-							links.AddPreconnect(pausedURL.Scheme + "://" + pausedURL.Host)
-						}
-
-						var body io.Reader
-						if event.Request.HasPostData {
-							body = strings.NewReader(event.Request.PostData)
-						}
-						subRequest := httptest.NewRequest(event.Request.Method, event.Request.URL, body).WithContext(reqContext)
-						for name, value := range event.Request.Headers {
-							subRequest.Header.Add(name, value.(string))
-						}
-
-						subResponse := &responseWriter{header: make(http.Header)}
-
-						server.ServeHTTP(subResponse, subRequest)
-
-						res = subResponse
-
-					} else if shouldHandleResourceType(event.ResourceType) && slices.Contains(m.ContinueHosts, pausedURL.Host) {
-						links.AddPreconnect(pausedURL.Scheme + "://" + pausedURL.Host)
-
-						err = fetch.ContinueRequest(event.RequestID).Do(ctx)
-						if err != nil {
-							m.log.Error("failed to continue request", zap.String("request_url", event.Request.URL), zap.Error(err))
-							browserCancel()
-						}
-
-						m.log.Debug("request continued", zap.String("request_url", event.Request.URL))
-
-						return
-
-					} else {
-						if pausedURL.Host == r.Host {
-							links.AddResource(event.Request.URL, event.ResourceType)
-						} else {
-							links.AddPreconnect(pausedURL.Scheme + "://" + pausedURL.Host)
-						}
-
-						err := fetch.FailRequest(event.RequestID, network.ErrorReasonBlockedByClient).Do(ctx)
-						if err != nil {
-							m.log.Error("failed to block request", zap.String("request_url", event.Request.URL), zap.Error(err))
-							browserCancel()
-						}
-
-						m.log.Debug("request blocked", zap.String("request_url", event.Request.URL))
-
-						return
-					}
-
-					fulfill := fetch.FulfillRequest(event.RequestID, int64(res.Status()))
-					fulfill.ResponseHeaders = make([]*fetch.HeaderEntry, 0, len(res.Header()))
-					for name, values := range res.Header() {
-						for _, value := range values {
-							fulfill.ResponseHeaders = append(fulfill.ResponseHeaders, &fetch.HeaderEntry{name, value})
-						}
-					}
-					fulfill.Body = base64.StdEncoding.EncodeToString(res.Buffer().Bytes())
-					err = fulfill.Do(ctx)
-					if err != nil {
-						m.log.Error("failed to fulfill request", zap.String("request_url", event.Request.URL), zap.Error(err))
-						browserCancel()
-						return
-					}
-
-					m.log.Debug("request fulfilled", zap.String("request_url", event.Request.URL), zap.Int("status", res.Status()))
-				}()
+			case *network.EventRequestWillBeSent:
+				reqURL, err := url.Parse(event.Request.URL)
+				if err != nil {
+					return
+				}
+				if reqURL.Host == r.Host {
+					links.AddResource(event.Request.URL, event.Type)
+				} else {
+					links.AddPreconnect(reqURL.Scheme + "://" + reqURL.Host)
+				}
 			case *runtime.EventExceptionThrown:
 				m.log.Error("exception thrown in runtime", zap.String("exception_details", event.ExceptionDetails.Exception.Description))
 			}
 		})
 		return nil
 	}))
+	cookieDomain := r.Host
+	if h, _, err := net.SplitHostPort(cookieDomain); err == nil {
+		cookieDomain = h
+	}
 	for _, cookie := range r.Cookies() {
-		tasks = append(tasks, network.SetCookie(cookie.Name, cookie.Value).WithDomain(r.Host))
+		tasks = append(tasks, network.SetCookie(cookie.Name, cookie.Value).WithDomain(cookieDomain))
 	}
 	if ua := r.UserAgent(); ua != "" {
 		tasks = append(tasks, emulation.SetUserAgentOverride(ua))
@@ -208,18 +169,38 @@ func (m *Middleware) ServeHTTP(w http.ResponseWriter, r *http.Request, next cadd
 		return p
 	}))
 	var serializer *domSerializer
-	tasks = append(tasks, chromedp.ActionFunc(func(ctx context.Context) error {
-		root, err := dom.GetDocument().WithDepth(-1).WithPierce(true).Do(ctx)
-		if err != nil {
-			return err
-		}
-		serializer = &domSerializer{root: root}
-		return nil
-	}))
+	var serializedHTML string
+	var finalURL string
+	// Capture location.href so we can detect cross-origin redirects.
+	// Browsers follow redirects through the proxy directly, so we won't see
+	// a Run error like the old fetch.Enable / failRequest path produced.
+	tasks = append(tasks, chromedp.Evaluate("location.href", &finalURL))
+	if m.lightpanda {
+		// Lightpanda supports shadow DOM in JS but does not expose shadow
+		// roots through CDP DOM.getDocument; serialize the document in JS
+		// (including shadow roots as <template shadowrootmode>).
+		tasks = append(tasks, chromedp.Evaluate(serializeDOMScript, &serializedHTML))
+	} else {
+		tasks = append(tasks, chromedp.ActionFunc(func(ctx context.Context) error {
+			root, err := dom.GetDocument().WithDepth(-1).WithPierce(true).Do(ctx)
+			if err != nil {
+				return err
+			}
+			serializer = &domSerializer{root: root}
+			return nil
+		}))
+	}
 	err = chromedp.Run(browserCtx, tasks)
 	if err != nil {
 		m.log.Info("failed to run chrome", zap.String("url", navigateURL), zap.Error(err))
 		return errors.Wrap(recorder.WriteResponse(), "failed to write original response")
+	}
+	if finalURL != "" {
+		if loc, err := url.Parse(finalURL); err == nil && loc.Host != r.Host {
+			m.log.Info("page navigated cross-origin; serving original response",
+				zap.String("url", navigateURL), zap.String("final_url", finalURL))
+			return errors.Wrap(recorder.WriteResponse(), "failed to write original response")
+		}
 	}
 
 	headers := recorder.Header().Clone()
@@ -241,24 +222,15 @@ func (m *Middleware) ServeHTTP(w http.ResponseWriter, r *http.Request, next cadd
 
 	w.WriteHeader(recorder.Status())
 
-	if err := serializer.Serialize(w); err != nil {
-		return errors.Wrap(err, "failed to serialize")
+	if serializer != nil {
+		if err := serializer.Serialize(w); err != nil {
+			return errors.Wrap(err, "failed to serialize")
+		}
+	} else if _, err := io.WriteString(w, serializedHTML); err != nil {
+		return errors.Wrap(err, "failed to write serialized response")
 	}
 
 	return nil
-}
-
-func shouldHandleResourceType(resourceType network.ResourceType) bool {
-	switch resourceType {
-	case network.ResourceTypeScript:
-		fallthrough
-	case network.ResourceTypeXHR:
-		fallthrough
-	case network.ResourceTypeFetch:
-		return true
-	default:
-		return false
-	}
 }
 
 var (

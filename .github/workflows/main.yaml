@@ -1,7 +1,7 @@
 on: [push]
 
 jobs:
-  test:
+  test-chrome:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -9,4 +9,22 @@ jobs:
         with:
           go-version: 1.22.5
       - run: go get .
+      - run: go test -v ./...
+
+  test-lightpanda:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: 1.22.5
+      - name: Install Lightpanda
+        run: |
+          curl -sSL -o /usr/local/bin/lightpanda https://github.com/lightpanda-io/browser/releases/latest/download/lightpanda-x86_64-linux
+          chmod +x /usr/local/bin/lightpanda
+          lightpanda version
+      - run: go get .
+      # The middleware auto-detects lightpanda from PATH (preferred over
+      # chrome) and launches it itself through the render proxy. No
+      # external lightpanda process or env-var indirection needed.
       - run: go test -v ./...
