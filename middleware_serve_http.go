@@ -3,11 +3,9 @@ package caddy_chrome
 import (
 	"bytes"
 	"context"
-	"encoding/base64"
 	"github.com/caddyserver/caddy/v2/modules/caddyhttp"
 	"github.com/chromedp/cdproto/dom"
 	"github.com/chromedp/cdproto/emulation"
-	"github.com/chromedp/cdproto/fetch"
 	"github.com/chromedp/cdproto/network"
 	"github.com/chromedp/cdproto/page"
 	"github.com/chromedp/cdproto/runtime"
@@ -18,10 +16,7 @@ import (
 	"mime"
 	"net"
 	"net/http"
-	"net/http/httptest"
 	"net/url"
-	"slices"
-	"strings"
 	"sync"
 )
 
@@ -108,159 +103,52 @@ func (m *Middleware) ServeHTTP(w http.ResponseWriter, r *http.Request, next cadd
 
 	links := newLinks()
 
+	// All browser traffic is intercepted by the in-process render proxy
+	// (exec mode) or routed back through Caddy via the bypass header
+	// (url mode). Either way, no CDP Fetch interception is involved.
 	var tasks chromedp.Tasks
-	if m.lightpanda {
-		// Lightpanda's CDP processes commands serially per session and dead-
-		// locks if we issue Fetch.fulfillRequest/continueRequest for sub-
-		// resources while the navigate fulfillment is still being parsed
-		// (e.g. a <script type=module> with an inline `import`). Skip Fetch
-		// interception entirely.
-		tasks = append(tasks, network.Enable())
-		if m.proxy != nil {
-			// We launched lightpanda ourselves with --http-proxy pointing at
-			// our renderProxy. Tag every outgoing request with the render ID
-			// so the proxy knows which in-flight render to route through.
-			id := m.proxy.register(&renderEntry{
-				navigateURL: navigateURL,
-				originHost:  r.Host,
-				server:      server,
-				recorder:    recorder,
-				links:       links,
-				reqContext:  reqContext,
-				log:         m.log,
-			})
-			defer m.proxy.unregister(id)
-			tasks = append(tasks, network.SetExtraHTTPHeaders(network.Headers{renderHeader: id}))
-		} else {
-			// External lightpanda (url mode): no proxy. Tag every request
-			// with the bypass marker so this middleware short-circuits when
-			// Lightpanda fetches the navigation / sub-resources directly
-			// from the same Caddy server.
-			tasks = append(tasks, network.SetExtraHTTPHeaders(network.Headers{bypassHeader: "1"}))
-		}
+	tasks = append(tasks, network.Enable())
+	if m.proxy != nil {
+		id := m.proxy.register(&renderEntry{
+			navigateURL:   navigateURL,
+			originHost:    r.Host,
+			fulfillHosts:  m.FulfillHosts,
+			continueHosts: m.ContinueHosts,
+			server:        server,
+			recorder:      recorder,
+			links:         links,
+			reqContext:    reqContext,
+			log:           m.log,
+		})
+		defer m.proxy.unregister(id)
+		tasks = append(tasks, network.SetExtraHTTPHeaders(network.Headers{renderHeader: id}))
 	} else {
-		tasks = append(tasks, fetch.Enable())
+		// External browser (url mode): no proxy. Tag every request with
+		// the bypass marker so this middleware short-circuits when the
+		// browser fetches the navigation / sub-resources directly from
+		// the same Caddy server.
+		tasks = append(tasks, network.SetExtraHTTPHeaders(network.Headers{bypassHeader: "1"}))
 	}
 	tasks = append(tasks, runtime.Enable())
-	if m.lightpanda {
-		tasks = append(tasks, chromedp.ActionFunc(func(ctx context.Context) error {
-			chromedp.ListenTarget(ctx, func(event any) {
-				switch event := event.(type) {
-				case *network.EventRequestWillBeSent:
-					reqURL, err := url.Parse(event.Request.URL)
-					if err != nil {
-						return
-					}
-					if reqURL.Host == r.Host {
-						links.AddResource(event.Request.URL, event.Type)
-					} else {
-						links.AddPreconnect(reqURL.Scheme + "://" + reqURL.Host)
-					}
-				case *runtime.EventExceptionThrown:
-					m.log.Error("exception thrown in runtime", zap.String("exception_details", event.ExceptionDetails.Exception.Description))
+	tasks = append(tasks, chromedp.ActionFunc(func(ctx context.Context) error {
+		chromedp.ListenTarget(ctx, func(event any) {
+			switch event := event.(type) {
+			case *network.EventRequestWillBeSent:
+				reqURL, err := url.Parse(event.Request.URL)
+				if err != nil {
+					return
 				}
-			})
-			return nil
-		}))
-	} else {
-		tasks = append(tasks, chromedp.ActionFunc(func(ctx context.Context) error {
-			chromedp.ListenTarget(ctx, func(event any) {
-				switch event := event.(type) {
-				case *fetch.EventRequestPaused:
-					go func() {
-						var res response
-						pausedURL, err := url.Parse(event.Request.URL)
-						m.log.Debug("request paused",
-							zap.String("request_url", event.Request.URL),
-							zap.Bool("is_navigate", event.Request.URL == navigateURL),
-							zap.Bool("has_post_data", event.Request.HasPostData))
-
-						if err != nil {
-							m.log.Error("failed to parse request URL", zap.String("request_url", event.Request.URL), zap.Error(err))
-							browserCancel()
-							return
-						}
-
-						if event.Request.URL == navigateURL {
-							res = recorder
-
-						} else if shouldHandleResourceType(event.ResourceType) && (pausedURL.Host == r.Host || slices.Contains(m.FulfillHosts, pausedURL.Host)) {
-							if pausedURL.Host == r.Host {
-								links.AddResource(event.Request.URL, event.ResourceType)
-							} else {
-								links.AddPreconnect(pausedURL.Scheme + "://" + pausedURL.Host)
-							}
-
-							var body io.Reader
-							if event.Request.HasPostData {
-								body = strings.NewReader(event.Request.PostData)
-							}
-							subRequest := httptest.NewRequest(event.Request.Method, event.Request.URL, body).WithContext(reqContext)
-							for name, value := range event.Request.Headers {
-								subRequest.Header.Add(name, value.(string))
-							}
-
-							subResponse := &responseWriter{header: make(http.Header)}
-
-							server.ServeHTTP(subResponse, subRequest)
-
-							res = subResponse
-
-						} else if shouldHandleResourceType(event.ResourceType) && slices.Contains(m.ContinueHosts, pausedURL.Host) {
-							links.AddPreconnect(pausedURL.Scheme + "://" + pausedURL.Host)
-
-							err = fetch.ContinueRequest(event.RequestID).Do(ctx)
-							if err != nil {
-								m.log.Error("failed to continue request", zap.String("request_url", event.Request.URL), zap.Error(err))
-								browserCancel()
-							}
-
-							m.log.Debug("request continued", zap.String("request_url", event.Request.URL))
-
-							return
-
-						} else {
-							if pausedURL.Host == r.Host {
-								links.AddResource(event.Request.URL, event.ResourceType)
-							} else {
-								links.AddPreconnect(pausedURL.Scheme + "://" + pausedURL.Host)
-							}
-
-							err := fetch.FailRequest(event.RequestID, network.ErrorReasonBlockedByClient).Do(ctx)
-							if err != nil {
-								m.log.Error("failed to block request", zap.String("request_url", event.Request.URL), zap.Error(err))
-								browserCancel()
-							}
-
-							m.log.Debug("request blocked", zap.String("request_url", event.Request.URL))
-
-							return
-						}
-
-						fulfill := fetch.FulfillRequest(event.RequestID, int64(res.Status()))
-						fulfill.ResponseHeaders = make([]*fetch.HeaderEntry, 0, len(res.Header()))
-						for name, values := range res.Header() {
-							for _, value := range values {
-								fulfill.ResponseHeaders = append(fulfill.ResponseHeaders, &fetch.HeaderEntry{name, value})
-							}
-						}
-						fulfill.Body = base64.StdEncoding.EncodeToString(res.Buffer().Bytes())
-						err = fulfill.Do(ctx)
-						if err != nil {
-							m.log.Error("failed to fulfill request", zap.String("request_url", event.Request.URL), zap.Error(err))
-							browserCancel()
-							return
-						}
-
-						m.log.Debug("request fulfilled", zap.String("request_url", event.Request.URL), zap.Int("status", res.Status()))
-					}()
-				case *runtime.EventExceptionThrown:
-					m.log.Error("exception thrown in runtime", zap.String("exception_details", event.ExceptionDetails.Exception.Description))
+				if reqURL.Host == r.Host {
+					links.AddResource(event.Request.URL, event.Type)
+				} else {
+					links.AddPreconnect(reqURL.Scheme + "://" + reqURL.Host)
 				}
-			})
-			return nil
-		}))
-	}
+			case *runtime.EventExceptionThrown:
+				m.log.Error("exception thrown in runtime", zap.String("exception_details", event.ExceptionDetails.Exception.Description))
+			}
+		})
+		return nil
+	}))
 	cookieDomain := r.Host
 	if h, _, err := net.SplitHostPort(cookieDomain); err == nil {
 		cookieDomain = h
@@ -343,19 +231,6 @@ func (m *Middleware) ServeHTTP(w http.ResponseWriter, r *http.Request, next cadd
 	}
 
 	return nil
-}
-
-func shouldHandleResourceType(resourceType network.ResourceType) bool {
-	switch resourceType {
-	case network.ResourceTypeScript:
-		fallthrough
-	case network.ResourceTypeXHR:
-		fallthrough
-	case network.ResourceTypeFetch:
-		return true
-	default:
-		return false
-	}
 }
 
 var (

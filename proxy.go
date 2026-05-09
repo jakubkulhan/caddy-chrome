@@ -6,7 +6,9 @@ import (
 	"crypto/rsa"
 	"crypto/tls"
 	"crypto/x509"
+	"crypto/sha256"
 	"crypto/x509/pkix"
+	"encoding/base64"
 	"encoding/hex"
 	"errors"
 	"github.com/chromedp/cdproto/network"
@@ -16,6 +18,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"sync"
 	"time"
 )
@@ -40,19 +43,23 @@ type renderProxy struct {
 	mu       sync.RWMutex
 	renders  map[string]*renderEntry
 
-	ca       *tls.Certificate
-	leafMu   sync.Mutex
-	leaves   map[string]*tls.Certificate
+	ca           *tls.Certificate
+	leafKey      *rsa.PrivateKey
+	leafSPKIHash string // base64(SHA-256(SPKI)) — what chrome wants for --ignore-certificate-errors-spki-list
+	leafMu       sync.Mutex
+	leaves       map[string]*tls.Certificate
 }
 
 type renderEntry struct {
-	navigateURL string
-	originHost  string
-	server      http.Handler
-	recorder    response
-	links       *links
-	reqContext  context.Context
-	log         *zap.Logger
+	navigateURL   string
+	originHost    string
+	fulfillHosts  []string
+	continueHosts []string
+	server        http.Handler
+	recorder      response
+	links         *links
+	reqContext    context.Context
+	log           *zap.Logger
 }
 
 func newRenderProxy(log *zap.Logger) (*renderProxy, error) {
@@ -60,17 +67,28 @@ func newRenderProxy(log *zap.Logger) (*renderProxy, error) {
 	if err != nil {
 		return nil, err
 	}
+	leafKey, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		return nil, err
+	}
+	spkiDER, err := x509.MarshalPKIXPublicKey(&leafKey.PublicKey)
+	if err != nil {
+		return nil, err
+	}
+	leafSPKIHash := sha256.Sum256(spkiDER)
 	l, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		return nil, err
 	}
 	p := &renderProxy{
-		addr:     "http://" + l.Addr().String(),
-		listener: l,
-		log:      log,
-		renders:  map[string]*renderEntry{},
-		ca:       ca,
-		leaves:   map[string]*tls.Certificate{},
+		addr:         "http://" + l.Addr().String(),
+		listener:     l,
+		log:          log,
+		renders:      map[string]*renderEntry{},
+		ca:           ca,
+		leafKey:      leafKey,
+		leafSPKIHash: base64.StdEncoding.EncodeToString(leafSPKIHash[:]),
+		leaves:       map[string]*tls.Certificate{},
 	}
 	p.server = &http.Server{Handler: http.HandlerFunc(p.serve)}
 	go func() {
@@ -244,10 +262,6 @@ func (p *renderProxy) leafFor(host string) (*tls.Certificate, error) {
 	if c, ok := p.leaves[host]; ok {
 		return c, nil
 	}
-	priv, err := rsa.GenerateKey(rand.Reader, 2048)
-	if err != nil {
-		return nil, err
-	}
 	serial, err := rand.Int(rand.Reader, new(big.Int).Lsh(big.NewInt(1), 62))
 	if err != nil {
 		return nil, err
@@ -265,7 +279,9 @@ func (p *renderProxy) leafFor(host string) (*tls.Certificate, error) {
 	} else {
 		tmpl.DNSNames = []string{host}
 	}
-	der, err := x509.CreateCertificate(rand.Reader, tmpl, p.ca.Leaf, &priv.PublicKey, p.ca.PrivateKey)
+	// All leaves share p.leafKey so chrome can trust a single SPKI hash
+	// passed via --ignore-certificate-errors-spki-list.
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, p.ca.Leaf, &p.leafKey.PublicKey, p.ca.PrivateKey)
 	if err != nil {
 		return nil, err
 	}
@@ -275,7 +291,7 @@ func (p *renderProxy) leafFor(host string) (*tls.Certificate, error) {
 	}
 	cert := &tls.Certificate{
 		Certificate: [][]byte{der, p.ca.Leaf.Raw},
-		PrivateKey:  priv,
+		PrivateKey:  p.leafKey,
 		Leaf:        leaf,
 	}
 	p.leaves[host] = cert
@@ -304,11 +320,13 @@ func (p *renderProxy) handleHTTP(w http.ResponseWriter, r *http.Request, entry *
 		return
 	}
 
-	if r.URL.Host == entry.originHost {
-		// Sub-resource on the same Caddy server: route through the server
-		// handler so the rest of the Caddyfile (file_server, reverse_proxy,
-		// etc.) serves it. The bypass header short-circuits this middleware
-		// to avoid recursion.
+	host := r.URL.Host
+	switch {
+	case host == entry.originHost || slices.Contains(entry.fulfillHosts, host):
+		// Same Caddy server (or an explicit fulfill host): route through
+		// the server handler so the rest of the Caddyfile (file_server,
+		// reverse_proxy, etc.) serves it. The bypass header short-circuits
+		// this middleware on the synthetic sub-request to avoid recursion.
 		sub := httptest.NewRequest(r.Method, reqURL, r.Body).WithContext(entry.reqContext)
 		for name, values := range headers {
 			sub.Header[name] = values
@@ -317,30 +335,32 @@ func (p *renderProxy) handleHTTP(w http.ResponseWriter, r *http.Request, entry *
 		sw := &responseWriter{header: make(http.Header)}
 		entry.server.ServeHTTP(sw, sub)
 		writeBuffered(w, sw)
-		return
-	}
 
-	// Cross-origin: relay outbound. We don't validate against fulfill_hosts /
-	// continue_hosts here — those exist for chrome's Fetch interception and
-	// don't apply to lightpanda.
-	outReq, err := http.NewRequestWithContext(entry.reqContext, r.Method, reqURL, r.Body)
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusBadGateway)
-		return
+	case slices.Contains(entry.continueHosts, host):
+		// Allowlisted external host: actually fetch it.
+		outReq, err := http.NewRequestWithContext(entry.reqContext, r.Method, reqURL, r.Body)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadGateway)
+			return
+		}
+		outReq.Header = headers
+		resp, err := http.DefaultTransport.RoundTrip(outReq)
+		if err != nil {
+			entry.log.Debug("upstream fetch failed", zap.String("url", reqURL), zap.Error(err))
+			http.Error(w, err.Error(), http.StatusBadGateway)
+			return
+		}
+		defer resp.Body.Close()
+		for name, values := range resp.Header {
+			w.Header()[name] = values
+		}
+		w.WriteHeader(resp.StatusCode)
+		_, _ = io.Copy(w, resp.Body)
+
+	default:
+		entry.log.Debug("blocked cross-origin request", zap.String("url", reqURL))
+		http.Error(w, "blocked", http.StatusForbidden)
 	}
-	outReq.Header = headers
-	resp, err := http.DefaultTransport.RoundTrip(outReq)
-	if err != nil {
-		entry.log.Debug("upstream fetch failed", zap.String("url", reqURL), zap.Error(err))
-		http.Error(w, err.Error(), http.StatusBadGateway)
-		return
-	}
-	defer resp.Body.Close()
-	for name, values := range resp.Header {
-		w.Header()[name] = values
-	}
-	w.WriteHeader(resp.StatusCode)
-	_, _ = io.Copy(w, resp.Body)
 }
 
 func writeBuffered(w http.ResponseWriter, src response) {

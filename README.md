@@ -4,7 +4,7 @@
 
 ## Server-side rendering
 
-The middleware takes an HTML response from the upstream handlers, loads it up in Chrome on the server, and intercepts requests from the browser. Requests to the same host are routed internally in the webserver, possibly loading files, but also speaking to other applications e.g. by a reverse proxy. After the page is fully loaded, DOM is serialized to an HTML and then returned back to the client as the response.
+The middleware takes an HTML response from the upstream handlers, loads it up in a headless browser on the server, and intercepts requests from the browser. Interception is done by an in-process HTTP proxy: in `exec` mode the middleware launches the browser with `--proxy-server` (chrome) or `--http-proxy` (lightpanda) pointing at the proxy, MITMs HTTPS via a per-process self-signed CA, and routes requests according to host (same origin / `fulfill_hosts` → through the same Caddy server, `continue_hosts` → real network fetch, otherwise blocked). After the page is fully loaded, DOM is serialized to an HTML and then returned back to the client as the response.
 
 ```mermaid
 sequenceDiagram

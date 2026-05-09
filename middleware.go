@@ -112,13 +112,14 @@ func (m *Middleware) Provision(ctx caddy.Context) (err error) {
 		}
 		m.lightpanda = kind == browserLightpanda
 
+		m.proxy, perr = newRenderProxy(m.log)
+		if perr != nil {
+			return fmt.Errorf("start render proxy: %w", perr)
+		}
+
 		var args []string
 		switch kind {
 		case browserLightpanda:
-			m.proxy, perr = newRenderProxy(m.log)
-			if perr != nil {
-				return fmt.Errorf("start render proxy: %w", perr)
-			}
 			args = append(args, "serve", "--host", "127.0.0.1", "--port", strconv.Itoa(port))
 			args = append(args, "--http-proxy", m.proxy.addr)
 			args = append(args, m.ExecBrowser.Flags...)
@@ -133,6 +134,11 @@ func (m *Middleware) Provision(ctx caddy.Context) (err error) {
 			}
 			args = append(args, "--user-data-dir="+m.tempDir)
 			args = append(args, "--remote-debugging-port="+strconv.Itoa(port))
+			args = append(args, "--proxy-server="+m.proxy.addr)
+			// Chrome trusts our self-signed MITM CA only for leaf certs
+			// whose SPKI matches this hash. All leaves share a single key,
+			// so one hash is enough.
+			args = append(args, "--ignore-certificate-errors-spki-list="+m.proxy.leafSPKIHash)
 		}
 
 		m.log.Info("starting browser",

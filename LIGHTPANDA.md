@@ -121,8 +121,10 @@ It is also worth noting that Lightpanda does not honour `urlPattern`,
 than the default `*` silently no-ops, so we cannot ask Lightpanda to intercept
 "only the navigation" via patterns.
 
-**Fix.** We **do not call `fetch.Enable` at all**. There are two routing paths,
-chosen by whether the middleware launched Lightpanda itself:
+**Fix.** We **do not call `fetch.Enable` at all** — for either browser. The
+render proxy is the single interception path now (chrome and lightpanda go
+through the same code), chosen by whether the middleware launched the
+browser itself:
 
 - **`exec` mode (preferred): HTTP proxy.** The middleware starts a small HTTP
   proxy ([proxy.go](proxy.go)) on a free port and launches Lightpanda with
