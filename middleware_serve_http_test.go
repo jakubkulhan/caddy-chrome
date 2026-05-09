@@ -19,8 +19,15 @@ func TestMiddleware_ServeHTTP(t *testing.T) {
 		return http.ErrUseLastResponse
 	}
 	browserConfig := "exec"
+	isLightpanda := false
 	if u := os.Getenv("CADDY_CHROME_TEST_BROWSER_URL"); u != "" {
 		browserConfig = "url " + u
+		isLightpanda = true
+	} else if _, kind, err := resolveBrowser(""); err == nil && kind == browserLightpanda {
+		// exec mode picked lightpanda from PATH; pass the flag the test
+		// server's self-signed cert needs.
+		browserConfig = "exec -- --insecure-disable-tls-host-verification"
+		isLightpanda = true
 	}
 	tester.InitServer(fmt.Sprintf(`
 		{
@@ -55,7 +62,6 @@ func TestMiddleware_ServeHTTP(t *testing.T) {
 			file_server
 		}`, browserConfig), "caddyfile")
 
-	isLightpanda := os.Getenv("CADDY_CHROME_TEST_BROWSER_URL") != ""
 	for _, testCase := range []struct {
 		url              string
 		statusCode       int

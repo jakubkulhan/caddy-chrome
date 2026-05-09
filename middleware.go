@@ -12,8 +12,12 @@ import (
 	"github.com/chromedp/cdproto/cdp"
 	"github.com/chromedp/chromedp"
 	"go.uber.org/zap"
+	"io"
 	"net"
 	"net/http"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -33,18 +37,15 @@ type Middleware struct {
 	FulfillHosts  []string       `json:"fulfill_hosts,omitempty"`
 	ContinueHosts []string       `json:"continue_hosts,omitempty"`
 	Links         bool           `json:"links,omitempty"`
-	log           *zap.Logger
-	timeout       time.Duration
-	// allocCtx owns the underlying browser process (for exec) or the
-	// long-lived chromedp.RemoteAllocator wrapper. Per-request work uses a
-	// fresh chromedp.NewRemoteAllocator(browserURL) so every render gets its
-	// own CDP WebSocket — this is what gives concurrent requests true
-	// isolation.
-	allocCtx     context.Context
-	allocCancel  context.CancelFunc
-	keepAliveCtx context.Context
-	keepCancel   context.CancelFunc
-	browserURL   string
+	log     *zap.Logger
+	timeout time.Duration
+	// In exec mode the middleware itself launches and owns the browser
+	// process (cmd) and its temp user-data-dir (tempDir). Per-request work
+	// always uses a fresh chromedp.NewRemoteAllocator(browserURL) so every
+	// render gets its own CDP WebSocket.
+	cmd        *exec.Cmd
+	tempDir    string
+	browserURL string
 	lightpanda bool
 }
 
@@ -95,40 +96,63 @@ func (m *Middleware) Provision(ctx caddy.Context) (err error) {
 	}()
 
 	if m.ExecBrowser != nil {
-		// Pick a free port for chrome to listen on so we can build a stable
-		// HTTP debugging URL and reuse it for per-request remote allocators.
 		port, perr := pickFreePort()
 		if perr != nil {
 			return fmt.Errorf("pick debug port: %w", perr)
 		}
-		var opts []chromedp.ExecAllocatorOption
-		if m.ExecBrowser.Path != "" {
-			opts = append(opts, chromedp.ExecPath(m.ExecBrowser.Path))
+
+		execPath, kind, perr := resolveBrowser(m.ExecBrowser.Path)
+		if perr != nil {
+			return perr
 		}
-		if m.ExecBrowser.DefaultFlags {
-			opts = append(opts, chromedp.DefaultExecAllocatorOptions[:]...)
+		m.lightpanda = kind == browserLightpanda
+
+		var args []string
+		switch kind {
+		case browserLightpanda:
+			args = append(args, "serve", "--host", "127.0.0.1", "--port", strconv.Itoa(port))
+			args = append(args, m.ExecBrowser.Flags...)
+		case browserChrome:
+			if m.ExecBrowser.DefaultFlags {
+				args = append(args, defaultChromeFlags...)
+			}
+			args = append(args, m.ExecBrowser.Flags...)
+			m.tempDir, perr = os.MkdirTemp("", "caddy-chrome-")
+			if perr != nil {
+				return fmt.Errorf("create user-data-dir: %w", perr)
+			}
+			args = append(args, "--user-data-dir="+m.tempDir)
+			args = append(args, "--remote-debugging-port="+strconv.Itoa(port))
 		}
-		for _, flag := range m.ExecBrowser.Flags {
-			parts := strings.SplitN(flag, "=", 2)
-			opts = append(opts, chromedp.Flag(parts[0], parts[1]))
-		}
-		// Override the default --remote-debugging-port=0 so we know the URL up
-		// front. chromedp only sets that flag if it's not already provided.
-		opts = append(opts, chromedp.Flag("remote-debugging-port", strconv.Itoa(port)))
-		m.allocCtx, m.allocCancel = chromedp.NewExecAllocator(context.Background(), opts...)
-		// Bootstrap a long-lived CDP connection so chrome stays running. The
-		// chromedp ExecAllocator kills the chrome process when its single
-		// browser connection drops, so we keep this one open for the lifetime
-		// of the middleware.
-		m.keepAliveCtx, m.keepCancel = chromedp.NewContext(m.allocCtx)
-		if err = chromedp.Run(m.keepAliveCtx, chromedp.ActionFunc(func(ctx context.Context) error {
-			c := chromedp.FromContext(ctx)
-			bctx := cdp.WithExecutor(ctx, c.Browser)
-			return logBrowserVersion(bctx, m.log, false)
-		})); err != nil {
-			return fmt.Errorf("start chrome: %w", err)
+
+		m.log.Info("starting browser",
+			zap.String("path", execPath),
+			zap.Bool("lightpanda", m.lightpanda),
+			zap.Strings("args", args))
+
+		m.cmd = exec.Command(execPath, args...)
+		m.cmd.Stdout = io.Discard
+		m.cmd.Stderr = io.Discard
+		if err = m.cmd.Start(); err != nil {
+			return fmt.Errorf("start %s: %w", execPath, err)
 		}
 		m.browserURL = fmt.Sprintf("http://127.0.0.1:%d/", port)
+
+		if err = waitForBrowser(m.browserURL, 10*time.Second); err != nil {
+			return fmt.Errorf("wait for browser: %w", err)
+		}
+
+		probeAlloc, probeAllocCancel := chromedp.NewRemoteAllocator(context.Background(), m.browserURL)
+		defer probeAllocCancel()
+		probeCtx, probeCancel := chromedp.NewContext(probeAlloc)
+		defer probeCancel()
+		if err = chromedp.Run(probeCtx, chromedp.ActionFunc(func(ctx context.Context) error {
+			c := chromedp.FromContext(ctx)
+			bctx := cdp.WithExecutor(ctx, c.Browser)
+			return logBrowserVersion(bctx, m.log, m.lightpanda)
+		})); err != nil {
+			return fmt.Errorf("connect to browser: %w", err)
+		}
 
 	} else {
 		m.browserURL = m.RemoteBrowser.URL
@@ -164,6 +188,109 @@ func logBrowserVersion(ctx context.Context, log *zap.Logger, lightpanda bool) er
 		zap.String("js_version", jsVersion),
 		zap.Bool("lightpanda", lightpanda))
 	return nil
+}
+
+type browserKind int
+
+const (
+	browserChrome browserKind = iota
+	browserLightpanda
+)
+
+var lightpandaBinaries = []string{"lightpanda"}
+
+var chromeBinaries = []string{
+	"google-chrome",
+	"google-chrome-stable",
+	"chromium",
+	"chromium-browser",
+	"/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+	"/Applications/Chromium.app/Contents/MacOS/Chromium",
+}
+
+var defaultChromeFlags = []string{
+	"--headless",
+	"--disable-gpu",
+	"--no-first-run",
+	"--no-default-browser-check",
+	"--disable-background-networking",
+	"--enable-features=NetworkService,NetworkServiceInProcess",
+	"--disable-background-timer-throttling",
+	"--disable-backgrounding-occluded-windows",
+	"--disable-breakpad",
+	"--disable-client-side-phishing-detection",
+	"--disable-default-apps",
+	"--disable-dev-shm-usage",
+	"--disable-extensions",
+	"--disable-hang-monitor",
+	"--disable-ipc-flooding-protection",
+	"--disable-popup-blocking",
+	"--disable-prompt-on-repost",
+	"--disable-renderer-backgrounding",
+	"--disable-sync",
+	"--force-color-profile=srgb",
+	"--metrics-recording-only",
+	"--mute-audio",
+	"--safebrowsing-disable-auto-update",
+	"--enable-automation",
+	"--password-store=basic",
+	"--use-mock-keychain",
+}
+
+// resolveBrowser picks which browser binary to launch. If execPath is set the
+// caller's choice wins and the kind is inferred from the basename. Otherwise
+// PATH is searched: lightpanda first, then chrome variants.
+func resolveBrowser(execPath string) (string, browserKind, error) {
+	if execPath != "" {
+		base := strings.ToLower(filepath.Base(execPath))
+		if strings.Contains(base, "lightpanda") {
+			return execPath, browserLightpanda, nil
+		}
+		return execPath, browserChrome, nil
+	}
+	for _, name := range lightpandaBinaries {
+		if p, err := exec.LookPath(name); err == nil {
+			return p, browserLightpanda, nil
+		}
+	}
+	for _, name := range chromeBinaries {
+		if filepath.IsAbs(name) {
+			if _, err := os.Stat(name); err == nil {
+				return name, browserChrome, nil
+			}
+			continue
+		}
+		if p, err := exec.LookPath(name); err == nil {
+			return p, browserChrome, nil
+		}
+	}
+	return "", 0, fmt.Errorf("no browser found in PATH (tried lightpanda, chrome variants); set exec <path>")
+}
+
+// waitForBrowser polls /json/version on the launched browser until it answers
+// or the deadline expires.
+func waitForBrowser(remoteURL string, timeout time.Duration) error {
+	versionURL := strings.TrimSuffix(remoteURL, "/") + "/json/version"
+	deadline := time.Now().Add(timeout)
+	client := &http.Client{Timeout: 1 * time.Second}
+	var lastErr error
+	for time.Now().Before(deadline) {
+		resp, err := client.Get(versionURL)
+		if err == nil {
+			resp.Body.Close()
+			if resp.StatusCode == http.StatusOK {
+				return nil
+			}
+			lastErr = fmt.Errorf("status %d", resp.StatusCode)
+		} else {
+			lastErr = err
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	if lastErr != nil {
+		return fmt.Errorf("timeout waiting for %s: %w", versionURL, lastErr)
+	}
+	return fmt.Errorf("timeout waiting for %s", versionURL)
 }
 
 func pickFreePort() (int, error) {
@@ -202,23 +329,22 @@ func detectLightpanda(remoteURL string) bool {
 }
 
 func (m *Middleware) cleanup() {
-	if m.keepCancel != nil {
-		// Cancelling the keep-alive context ends the chromedp managed browser
-		// connection, which lets ExecAllocator's watchdog tear down chrome.
-		m.keepCancel()
-		m.keepCancel = nil
+	if m.cmd != nil && m.cmd.Process != nil {
+		_ = m.cmd.Process.Signal(os.Interrupt)
+		done := make(chan error, 1)
+		go func() { done <- m.cmd.Wait() }()
+		select {
+		case <-done:
+		case <-time.After(5 * time.Second):
+			_ = m.cmd.Process.Kill()
+			<-done
+		}
+		m.cmd = nil
 	}
-	if m.allocCtx != nil {
-		timeoutCtx, c := context.WithTimeout(m.allocCtx, 10*time.Second)
-		defer c()
-		_ = chromedp.Cancel(timeoutCtx)
+	if m.tempDir != "" {
+		_ = os.RemoveAll(m.tempDir)
+		m.tempDir = ""
 	}
-	if m.allocCancel != nil {
-		m.allocCancel()
-		m.allocCancel = nil
-	}
-	m.allocCtx = nil
-	m.keepAliveCtx = nil
 }
 
 func (m *Middleware) Cleanup() error {

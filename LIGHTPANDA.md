@@ -43,10 +43,16 @@ same code path is used for Chrome: it's also faster there because each render
 gets its own root browser session instead of paying for
 `Target.createBrowserContext` / disposal on a shared WS reader.
 
-For `exec` mode the middleware launches the browser once with
-`--remote-debugging-port=<picked>`, keeps a long-lived bootstrap WS open so
-chromedp's watchdog doesn't kill the process, and serves every render through
-its own fresh WS to the same browser.
+For `exec` mode the middleware itself launches the browser via `os/exec`
+(not chromedp's allocator), so both chrome and lightpanda are launchable.
+PATH is searched lightpanda-first, falling back to chrome variants;
+explicit `exec <path>` wins. For lightpanda the command is
+`lightpanda serve --host 127.0.0.1 --port <picked>` plus user flags; for
+chrome it's the default flag set + `--user-data-dir=<temp>` +
+`--remote-debugging-port=<picked>`. The middleware polls `/json/version`
+until ready, then serves every render through its own fresh WS to the
+same browser. On `Cleanup` the process gets SIGINT (5 s grace, then SIGKILL)
+and the temp user-data-dir is removed.
 
 `Provision` for `url` mode uses a one-shot WS to log the browser version, then
 discards it.
@@ -180,11 +186,10 @@ workflow does this; the README documents it.
   [middleware.go](middleware.go) `detectLightpanda`, setting `m.lightpanda`
   when `/json/version` says `"Browser":"Lightpanda/..."`.
 - **Provision** — [middleware.go](middleware.go): for `exec` mode picks a
-  free port, launches the browser via `chromedp.NewExecAllocator` with
-  `--remote-debugging-port=<picked>`, and keeps a single bootstrap WS open
-  for the lifetime of the middleware so chromedp's watchdog doesn't kill the
-  process. For `url` mode it stores the configured URL and runs a one-shot
-  remote probe to log the browser version.
+  free port, resolves a binary via `resolveBrowser` (lightpanda first, then
+  chrome), launches it with `exec.Command`, polls `/json/version` until
+  ready, then runs a one-shot remote probe to log the browser version. For
+  `url` mode it stores the configured URL and runs the same one-shot probe.
 - **Per-request flow** — [middleware_serve_http.go](middleware_serve_http.go):
   - bypass-header short-circuit at the top of `ServeHTTP`,
   - one fresh `chromedp.NewRemoteAllocator` + `chromedp.NewContext` per
