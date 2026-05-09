@@ -171,14 +171,14 @@ func (m *Middleware) ServeHTTP(w http.ResponseWriter, r *http.Request, next cadd
 	var serializer *domSerializer
 	var serializedHTML string
 	var finalURL string
+	// Capture location.href so we can detect cross-origin redirects.
+	// Browsers follow redirects through the proxy directly, so we won't see
+	// a Run error like the old fetch.Enable / failRequest path produced.
+	tasks = append(tasks, chromedp.Evaluate("location.href", &finalURL))
 	if m.lightpanda {
-		// Browsers like Lightpanda support shadow DOM in JS but do not expose
-		// shadow roots through CDP DOM.getDocument. Serialize the document
-		// (including shadow roots as <template shadowrootmode>) in JS instead
-		// of mutating the live DOM. Also capture the document's final URL so
-		// we can detect cross-origin redirects (Lightpanda follows them
-		// directly because we don't intercept its requests).
-		tasks = append(tasks, chromedp.Evaluate("location.href", &finalURL))
+		// Lightpanda supports shadow DOM in JS but does not expose shadow
+		// roots through CDP DOM.getDocument; serialize the document in JS
+		// (including shadow roots as <template shadowrootmode>).
 		tasks = append(tasks, chromedp.Evaluate(serializeDOMScript, &serializedHTML))
 	} else {
 		tasks = append(tasks, chromedp.ActionFunc(func(ctx context.Context) error {
@@ -195,7 +195,7 @@ func (m *Middleware) ServeHTTP(w http.ResponseWriter, r *http.Request, next cadd
 		m.log.Info("failed to run chrome", zap.String("url", navigateURL), zap.Error(err))
 		return errors.Wrap(recorder.WriteResponse(), "failed to write original response")
 	}
-	if m.lightpanda && finalURL != "" {
+	if finalURL != "" {
 		if loc, err := url.Parse(finalURL); err == nil && loc.Host != r.Host {
 			m.log.Info("page navigated cross-origin; serving original response",
 				zap.String("url", navigateURL), zap.String("final_url", finalURL))

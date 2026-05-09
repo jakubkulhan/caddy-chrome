@@ -19,6 +19,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"slices"
+	"strings"
 	"sync"
 	"time"
 )
@@ -305,7 +306,7 @@ func (p *renderProxy) handleHTTP(w http.ResponseWriter, r *http.Request, entry *
 	if r.URL.Host == entry.originHost {
 		entry.links.AddResource(reqURL, resType)
 	} else {
-		entry.links.AddPreconnect(r.URL.Scheme + "://" + r.URL.Host)
+		entry.links.AddPreconnect(r.URL.Scheme + "://" + stripDefaultPort(r.URL.Scheme, r.URL.Host))
 	}
 
 	headers := r.Header.Clone()
@@ -361,6 +362,16 @@ func (p *renderProxy) handleHTTP(w http.ResponseWriter, r *http.Request, entry *
 		entry.log.Debug("blocked cross-origin request", zap.String("url", reqURL))
 		http.Error(w, "blocked", http.StatusForbidden)
 	}
+}
+
+func stripDefaultPort(scheme, host string) string {
+	switch scheme {
+	case "http":
+		return strings.TrimSuffix(host, ":80")
+	case "https":
+		return strings.TrimSuffix(host, ":443")
+	}
+	return host
 }
 
 func writeBuffered(w http.ResponseWriter, src response) {
